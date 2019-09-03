@@ -51,11 +51,16 @@ bool mptcp_is_reinjected(const struct sk_buff *skb)
 	return TCP_SKB_CB(skb)->mptcp_flags & MPTCP_REINJECT;  
 }
 
+bool mptcp_is_skb_redundant(const struct sk_buff *skb)
+{
+	return TCP_SKB_CB(skb)->mptcp_flags & MPTCP_REDUNDANT;
+}
+
 bool mptcp_snd_wnd_test(const struct tcp_sock *tp, 
     const struct sk_buff *skb, unsigned int cur_mss);
 unsigned int mptcp_cwnd_test(const struct tcp_sock *tp,
 			   const struct sk_buff *skb);
-static bool dcm_mptcp_is_temp_unavailable(struct sock *sk, const struct sk_buff
+static bool raven_mptcp_is_temp_unavailable(struct sock *sk, const struct sk_buff
     *skb, bool zero_wnd_test);
 
 static struct raven_sock_data *raven_get_data(const struct tcp_sock *tp)
@@ -161,7 +166,7 @@ fail:
  * puts onto the redundant queue
  * returns cloned skb
  */
-struct sk_buff *mptcp_dcm_enqueue_rdn_skb(struct sk_buff *orig_skb,
+struct sk_buff *mptcp_raven_enqueue_rdn_skb(struct sk_buff *orig_skb,
     struct sock *sk, unsigned int cnt_subflows, u8 subflow_pis)
 {
   struct tcp_sock *tp = tcp_sk(sk);
@@ -232,7 +237,7 @@ struct sk_buff *mptcp_dcm_enqueue_rdn_skb(struct sk_buff *orig_skb,
   u32 seq, eseq;
   seq = TCP_SKB_CB(skb)->seq;
   eseq = TCP_SKB_CB(skb)->end_seq;
-  if (unlikely(sysctl_mptcp_dcm_debug))
+  if (unlikely(sysctl_mptcp_raven_debug))
     mptcp_debug("[%s] redundant queue %u, len %u [%u - %u], curr %u, spi %u\n",
         __func__, skb_queue_len(&mpcb->raven_write_queue), skb->len,
         seq, eseq, atomic_read(&skb->cnt_redudnant),   skb->redundant_target_pis
@@ -321,7 +326,6 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
     u64 *pi_min, u64 *pi_max, ktime_t now_ts) 
 {
   struct tcp_sock *tp = tcp_sk(sk);
-  struct raven_pim_stat *stat = tp->mptcp->pim_stat;
   struct raven_sock_data *rsd = raven_get_data(tp);
   int pi_idx = rsd->pi_idx;
   
@@ -437,7 +441,7 @@ out:
 }
     
 
-static bool dcm_redundant_pi(struct sk_buff *skb, struct tcp_sock *tp)
+static bool raven_redundant_pi(struct sk_buff *skb, struct tcp_sock *tp)
 {
   if (unlikely(!skb || !tp)) return false;
 
@@ -490,7 +494,7 @@ struct sock *get_generic_subflow(struct mptcp_cb *mpcb,
     }
   
 
-   if (dcm_mptcp_is_temp_unavailable(sk, skb, zero_wnd_test)) {
+   if (raven_mptcp_is_temp_unavailable(sk, skb, zero_wnd_test)) {
      if (unused)
        found_unused_una = true;
      continue;
@@ -538,7 +542,7 @@ struct sock *get_generic_subflow(struct mptcp_cb *mpcb,
 /* this check whether this subflow is available or not
  * and does not have global view
  */
-static bool dcm_mptcp_is_temp_unavailable(struct sock *sk,
+static bool raven_mptcp_is_temp_unavailable(struct sock *sk,
 				      const struct sk_buff *skb,
 				      bool zero_wnd_test)
 {
@@ -747,7 +751,7 @@ struct sock *get_rdn_subflow(struct mptcp_cb *mpcb,
         continue;
 
 #if 0
-      if (mpcb->dcm_policy->redundancy && sysctl_mptcp_dcm_measure) 
+      if (mpcb->raven_policy->redundancy && sysctl_mptcp_raven_measure) 
       {
     
         if (!nowifi(sk, skb)) {
@@ -827,7 +831,7 @@ rdn_detected:
     }
   }
 
-  /* if (unlikely(!sysctl_mptcp_dcm_measure)) */
+  /* if (unlikely(!sysctl_mptcp_raven_measure)) */
   /*   return get_generic_subflow(mpcb, skb, &constr_selector, zwnd_test, force); */
 
   /* at this point, skb must only be from meta's write queue */
@@ -1035,7 +1039,7 @@ filter_subflows:
     if (!mptcp_dont_reinject_skb(tp, skb))
       unused = true;
 
-    if (dcm_mptcp_is_temp_unavailable(sk, skb, zwnd_test)) {
+    if (raven_mptcp_is_temp_unavailable(sk, skb, zwnd_test)) {
       /* pr_crit("[%s] subflow %u is temp unavailable\n", __func__, */
       /*     mptcp_path_index(sk)); */
       /* if (!blind_redundancy) { */ 
@@ -1163,7 +1167,7 @@ filter_subflows:
       /* pr_emerg("bestsk %u, target %u\n", pi_to_flag(bestsk), subflow_pis); */
 
       /* put into redundant queue to retrieve later */
-      rdn_skb = mptcp_dcm_enqueue_rdn_skb(skb, bestsk, cnt_subflows, subflow_pis);
+      rdn_skb = mptcp_raven_enqueue_rdn_skb(skb, bestsk, cnt_subflows, subflow_pis);
       if (unlikely(!rdn_skb))
         return NULL;
 
@@ -1256,9 +1260,9 @@ struct sock *raven_get_subflow(struct sock *meta_sk,
     /* find appropriate subflow for its usage */
     ret = get_rdn_subflow(mpcb, skb, &dummy_selector, zero_wnd_test, &force);
 #if 0
-    if (mpcb->dcm_policy->redundancy) {
+    if (mpcb->raven_policy->redundancy) {
       sk = get_rdn_subflow(mpcb, skb, &dummy_selector, zero_wnd_test, &force);
-    } else if (mpcb->dcm_policy->intnet) { // intentional networking
+    } else if (mpcb->raven_policy->intnet) { // intentional networking
       /* sk = get_intnet_subflow(meta_sk, skb, zero_wnd_test); */
       pr_emerg("[%s] depreciated!!!\n", __func__);
     } else {  // default mptcp policy
@@ -1291,13 +1295,12 @@ out:
  * sets it to -1  if it is a meta-level retransmission to optimize the
  * receive-buffer.
  */
-static struct sk_buff *__dcm_next_segment(struct sock *meta_sk, int *reinject, int *redundant)
+static struct sk_buff *__raven_next_segment(struct sock *meta_sk, int *reinject, int *redundant)
 {
   struct sock *sk;
   struct tcp_sock *meta_tp = tcp_sk(meta_sk);
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
 	struct sk_buff *skb = NULL;
-  struct sk_buff *tmp_skb;
   int cnt_redundant = -1; 
   u8 pm = 0;
   bool unused_found = false;
@@ -1319,18 +1322,14 @@ static struct sk_buff *__dcm_next_segment(struct sock *meta_sk, int *reinject, i
         seq <= meta_tp->redundant_snd_nxt &&seq <= meta_tp->snd_nxt) 
     {
 #if 1
-#if 1
-      /* pr_emerg("[%s] dcm seq %u freed, snd_una %u, snd_nxt %u, " */
+      /* pr_emerg("[%s] raven seq %u freed, snd_una %u, snd_nxt %u, " */
       /*     "snd_rdn_nxt %u, rdn? %s\n", __func__, seq, meta_tp->snd_una, */
       /*     meta_tp->snd_nxt, meta_tp->redundant_snd_nxt, */ 
       /*     (mptcp_is_skb_redundant(skb) ? "T" : "F")); */
-#endif
-#if 0
       __skb_unlink(skb, &mpcb->reinject_queue);
       kfree_skb(skb);
       skb = NULL;
       goto out;
-#endif
 #endif
     }
 
@@ -1349,7 +1348,7 @@ static struct sk_buff *__dcm_next_segment(struct sock *meta_sk, int *reinject, i
     }
 
 #if 0 
-  if (mpcb->dcm_policy->redundancy && sysctl_mptcp_dcm_measure) 
+  if (mpcb->raven_policy->redundancy && sysctl_mptcp_raven_measure) 
   {
     if (!skb_queue_empty(&mpcb->raven_write_queue)) 
     {
@@ -1385,8 +1384,8 @@ check_rwqueue:
     if (tcp_sk(sk)->snd_cwnd < 10) 
       tcp_sk(sk)->snd_cwnd = 10;
 
-check_again:
-    if (!dcm_mptcp_is_temp_unavailable(sk, skb, false))
+/* check_again: */
+    if (!raven_mptcp_is_temp_unavailable(sk, skb, false))
       unused_found = true;
 
     if (!unused_found) {
@@ -1467,13 +1466,10 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
 {
 	struct sk_buff *skb;
 	struct tcp_sock *subtp;
-  struct tcp_sock *meta_tp = tcp_sk(meta_sk);
-	struct mptcp_cb *mpcb = meta_tp->mpcb;
   unsigned int mss_now;
 	u16 gso_max_segs;
 	u32 max_len, max_segs, window, needed;
   int redundant = 0;
-  u16 port;
   bool returnnull = false;
 
   *reinject = 0;
@@ -1481,7 +1477,7 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
 	/* as we set it, we have to reset it as well. */
 	*limit = 0;
 
-  /* /1* if (sysctl_mptcp_dcm_measure && mpcb && (mpcb->dcm_policy->redundancy)) { *1/ */
+  /* /1* if (sysctl_mptcp_raven_measure && mpcb && (mpcb->raven_policy->redundancy)) { *1/ */
   /*     pr_emerg("[%s] qlen %u, %u, %u, snd_una %u, snd_nxt %u\n", */
   /*         __func__, */ 
   /*         skb_queue_len(&((meta_sk)->sk_write_queue)), */
@@ -1499,7 +1495,7 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
   /* if (port == 48081)  // flipflop on data-flow only */
   { 
 #if defined(FLIPFLOP) && FLIPFLOP
-  if (sysctl_mptcp_dcm_measure && mpcb->stripe_mode) { 
+  if (sysctl_mptcp_raven_measure && mpcb->stripe_mode) { 
       /* pr_emerg("[%s] qlen %u, current mode stripe\n", __func__, */
       /*     skb_queue_len(&((meta_sk)->sk_write_queue))); */
 
@@ -1515,9 +1511,9 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
   /* for other policies, use default next_segment note that for principled
    * redundancy segments, it will return redundant int set 
    */
-  skb = __dcm_next_segment(meta_sk, reinject, &redundant); 
+  skb = __raven_next_segment(meta_sk, reinject, &redundant); 
 	if (!skb) {
-    /* /1* if (sysctl_mptcp_dcm_measure) *1/ */ 
+    /* /1* if (sysctl_mptcp_raven_measure) *1/ */ 
     /*   pr_emerg("[%s] returning NULL! (no more data - %u, %u, %u)\n", __func__, */
     /*       skb_queue_len(&((meta_sk)->sk_write_queue)), */
     /*       skb_queue_len(&mpcb->raven_write_queue), */
@@ -1533,13 +1529,13 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
    */
 	*subsk = raven_get_subflow(meta_sk, skb, false);
 	if (!*subsk) {
-    /* /1* if (sysctl_mptcp_dcm_measure) *1/ */ 
+    /* /1* if (sysctl_mptcp_raven_measure) *1/ */ 
     /*   pr_emerg("[%s] returning NULL! (no subflow)\n", __func__); */
 		return NULL;
   }
 
 #if 0 // FIXME: later...
-  if (mpcb->dcm_policy->redundancy && sysctl_mptcp_raven_collect_samples) 
+  if (mpcb->raven_policy->redundancy && sysctl_mptcp_raven_collect_samples) 
   {
     if (!tcp_sk(*subsk)->mptcp->lambda) {
       struct raven_sock_data *rsd = raven_get_data(tcp_sk(*subsk));
@@ -1571,9 +1567,9 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
   }
 
   redundant = skb->cnt_redundant;
-  /* if (likely(mpcb->dcm_policy->redundancy) && */
+  /* if (likely(mpcb->raven_policy->redundancy) && */
   if (redundant >=0 &&
-      likely(mptcp_is_skb_redundant(skb)) && !dcm_redundant_pi(skb, tcp_sk(*subsk)))
+      likely(mptcp_is_skb_redundant(skb)) && !raven_redundant_pi(skb, tcp_sk(*subsk)))
   {
     if (!redundant) {
       TCP_SKB_CB(skb)->mptcp_flags |= MPTCP_REINJECT;
@@ -1643,7 +1639,7 @@ out:
     seq = TCP_SKB_CB(skb)->seq;
     eseq = TCP_SKB_CB(skb)->end_seq;
 #if 1
-    /* /1* if (sysctl_mptcp_dcm_measure) *1/ */ 
+    /* /1* if (sysctl_mptcp_raven_measure) *1/ */ 
     /* pr_crit("[%s] pi %u, cnt_redudnant %d, " */
     /*     "seq %u, eseq %u, pm %u, len %u, " */
     /*     "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u] rj %u, wd %s\n" */
@@ -1695,7 +1691,7 @@ unsigned int mptcp_cwnd_test(const struct tcp_sock *tp,
 	return 0;
 }
 
-/* note: make sure to `dcm_close' is invoked from **server** side 
+/* note: make sure to `raven_close' is invoked from **server** side 
  * for redundancy policy. this is ducttape-fix but seems to be working.
  * why? client calls `mptcp_sub_close_passive' from mp_fin pkt and closes
  * the connection. in reverse case, server is stuck in dead-lock or ignores
