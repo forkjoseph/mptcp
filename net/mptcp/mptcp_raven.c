@@ -11,16 +11,12 @@
  */
  
 #include <net/mptcp.h>
+#include <net/mptcp_raven_config.h>
 #include <net/mptcp_raven_stale_table.h>
 
 /* #define FLIPFLOP 1 */
 #define ENABLE_AGING 1
 #define PERF_STAT 0
-
-/* #define CASE 1 */
-#define CASE 2
-/* #define CASE 3 */
-/* #define CASE 4 */
 
 static bool has_been_est;
 static unsigned int has_been_sent;
@@ -30,124 +26,6 @@ static int target_ci = 0;
 #if defined(FLIPFLOP) && FLIPFLOP
 static int to_stripe = 0;
 static int to_redundancy = 0;
-#endif
-
-/* 10, 50, 90 */
-/* #define CI_INT 10 */
-/* #define CI_INT 30 */
-/* #define CI_INT 50 */
-/* #define CI_INT 70 */
-#define CI_INT 90
-
-#if CASE == 1
-int lambdas[] = {256, 128, 512};
-#elif CASE == 2
-int lambdas[] = {256, 256};
-#elif CASE == 3
-int lambdas[] = {262144, 128};
-#elif CASE == 4
-int lambdas[] = {256, 256, 512};
-#endif
-
-#if CI_INT == 99
-u64 D1_pi_lower[] = {787334,752643,966856};
-u64 D1_pi_upper[] = {3936634,4127235,0};
-u64 D2_pi_lower[] = {756347,680659,0};
-u64 D2_pi_upper[] = {3292420,2576190,0};
-u64 D3_pi_lower[] = {419991,676278,0};
-u64 D3_pi_upper[] = {1291907,2635462,0};
-u64 D4_pi_lower[] = {753534,730933,946640};
-u64 D4_pi_upper[] = {3281479,3766393,0};
-#elif CI_INT == 95
-u64 D1_pi_lower[] = {462532,606675,908413};
-u64 D1_pi_upper[] = {812929,1501633,0};
-u64 D2_pi_lower[] = {424631,601345,0};
-u64 D2_pi_upper[] = {759120,1448652,0};
-u64 D3_pi_lower[] = {362897,601504,0};
-u64 D3_pi_upper[] = {383529,1472761,0};
-u64 D4_pi_lower[] = {447624,600090,847840};
-u64 D4_pi_upper[] = {784219,1461717,0};
-#elif CI_INT == 90
-u64 D1_pi_lower[] = {361947,576523,816939};
-u64 D1_pi_upper[] = {608279,1332878,18466678};
-u64 D2_pi_lower[] = {346658,578041,0};
-u64 D2_pi_upper[] = {578346,1321089,0};
-u64 D3_pi_lower[] = {316387,579569,0};
-u64 D3_pi_upper[] = {236690,1350638,0};
-u64 D4_pi_lower[] = {358092,574339,775918};
-u64 D4_pi_upper[] = {594055,1309951,5390306};
-#elif CI_INT == 80
-u64 D1_pi_lower[] = {278221,533480,706963};
-u64 D1_pi_upper[] = {429749,1150244,3777847};
-u64 D2_pi_lower[] = {259800,538287,0};
-u64 D2_pi_upper[] = {407583,1146702,0};
-u64 D3_pi_lower[] = {233970,540099,0};
-u64 D3_pi_upper[] = {140364,1167107,0};
-u64 D4_pi_lower[] = {273503,533401,631710};
-u64 D4_pi_upper[] = {422255,1128707,2113743};
-#elif CI_INT == 70
-u64 D1_pi_lower[] = {208676,485690,615585};
-u64 D1_pi_upper[] = {290257,972770,1868396};
-u64 D2_pi_lower[] = {194469,491336,0};
-u64 D2_pi_upper[] = {264843,977156,0};
-u64 D3_pi_lower[] = {148813,493555,0};
-u64 D3_pi_upper[] = {96460,1002258,0};
-u64 D4_pi_lower[] = {202960,487853,492502};
-u64 D4_pi_upper[] = {287893,954038,1212098};
-#elif CI_INT == 60
-u64 D1_pi_lower[] = {157688,420107,516293};
-u64 D1_pi_upper[] = {186319,761561,1191908};
-u64 D2_pi_lower[] = {151467,424574,0};
-u64 D2_pi_upper[] = {171034,754695,0};
-u64 D3_pi_lower[] = {112953,431519,0};
-u64 D3_pi_upper[] = {73563,778170,0};
-u64 D4_pi_lower[] = {156934,420171,401285};
-u64 D4_pi_upper[] = {187152,735808,649531};
-#elif CI_INT == 50
-u64 D1_pi_lower[] = {123352,326109,421030};
-u64 D1_pi_upper[] = {125886,430031,767147};
-u64 D2_pi_lower[] = {120001,305092,0};
-u64 D2_pi_upper[] = {115287,390473,0};
-u64 D3_pi_lower[] = {86829,286603,0};
-u64 D3_pi_upper[] = {56479,354719,0};
-u64 D4_pi_lower[] = {122696,307101,320914};
-u64 D4_pi_upper[] = {127869,377095,402959};
-#elif CI_INT == 40
-u64 D1_pi_lower[] = {93449,182557,337674};
-u64 D1_pi_upper[] = {83907,167838,478265};
-u64 D2_pi_lower[] = {92196,152405,0};
-u64 D2_pi_upper[] = {79788,149529,0};
-u64 D3_pi_lower[] = {65917,131245,0};
-u64 D3_pi_upper[] = {42081,138819,0};
-u64 D4_pi_lower[] = {93376,159799,257104};
-u64 D4_pi_upper[] = {84055,152391,256437};
-#elif CI_INT == 30
-u64 D1_pi_lower[] = {69899,103405,258950};
-u64 D1_pi_upper[] = {56520,84636,302052};
-u64 D2_pi_lower[] = {69126,91969,0};
-u64 D2_pi_upper[] = {53122,79317,0};
-u64 D3_pi_lower[] = {48416,79626,0};
-u64 D3_pi_upper[] = {28838,75473,0};
-u64 D4_pi_lower[] = {70141,96670,208153};
-u64 D4_pi_upper[] = {54327,79911,159768};
-#elif CI_INT == 20
-u64 D1_pi_lower[] = {50618,62581,192078};
-u64 D1_pi_upper[] = {32238,43086,176712};
-u64 D2_pi_lower[] = {49507,56865,0};
-u64 D2_pi_upper[] = {30107,41232,0};
-u64 D3_pi_lower[] = {34664,50316,0};
-u64 D3_pi_upper[] = {15453,40463,0};
-u64 D4_pi_lower[] = {50697,61630,149112};
-u64 D4_pi_upper[] = {30826,42269,78752};
-#elif CI_INT == 10
-u64 D1_pi_lower[] = {32697,38454,127711};
-u64 D1_pi_upper[] = {6826,9582,56927};
-u64 D2_pi_lower[] = {32787,31800,0};
-u64 D2_pi_upper[] = {6709,13442,0};
-u64 D3_pi_lower[] = {21441,30129,0};
-u64 D3_pi_upper[] = {2506,11697,0};
-u64 D4_pi_lower[] = {32719,34934,89613};
-u64 D4_pi_upper[] = {7060,11269,19796};
 #endif
 
 /* private data */

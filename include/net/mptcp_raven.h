@@ -4,12 +4,8 @@
 #include <linux/fs.h>      // Needed by filp
 #include <asm/uaccess.h>   // Needed by segment descriptors
 
-
-extern int sysctl_mptcp_raven_enabled;
-extern int sysctl_mptcp_raven_threshold;
 extern int sysctl_mptcp_raven_collect_samples;
 extern int sysctl_mptcp_raven_measure;
-extern int sysctl_mptcp_raven_debug;
 
 extern int sysctl_mptcp_raven_mode;
 extern int sysctl_mptcp_raven_cancelling;
