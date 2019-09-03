@@ -597,19 +597,34 @@ void tcp_rcv_space_adjust(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 copied;
 	int time;
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  // looks like this routine increments 
+  //  1) subflow's rcvwnd if comes from tcp_data_queue()
+  //  2) meta's rcvwnd if comes from mptcp_direct_copy()
+  struct mptcp_cb *mpcb = NULL;
+  int rdn_dropped = 0;
+#endif
 
 	tcp_mstamp_refresh(tp);
 	time = tcp_stamp_us_delta(tp->tcp_mstamp, tp->rcvq_space.time);
 	if (mptcp(tp)) {
 		if (mptcp_check_rtt(tp, time))
 			return;
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+    mpcb = tp->mpcb;
+#endif
 	} else if (time < (tp->rcv_rtt_est.rtt_us >> 3) || tp->rcv_rtt_est.rtt_us == 0)
 		return;
 
 	/* Number of bytes copied to user in last RTT */
 	copied = tp->copied_seq - tp->rcvq_space.seq;
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  if ((copied + rdn_dropped) <= tp->rcvq_space.space)
+		goto new_measure;
+#else
 	if (copied <= tp->rcvq_space.space)
 		goto new_measure;
+#endif
 
 	/* A bit of theory :
 	 * copied = bytes received in previous RTT, our base window
@@ -624,11 +639,20 @@ void tcp_rcv_space_adjust(struct sock *sk)
 	    !(sk->sk_userlocks & SOCK_RCVBUF_LOCK)) {
 		int rcvmem, rcvbuf;
 		u64 rcvwin;
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+    int oldwin;
+
+    if (rdn_dropped)
+      copied += mpcb->cnt_rcv_redundant_skb;
+#endif
 
 		/* minimal window to cope with packet losses, assuming
 		 * steady state. Add some cushion because of small variations.
 		 */
 		rcvwin = ((u64)copied << 1) + 16 * tp->advmss;
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+    oldwin = rcvwin;
+#endif
 
 		/* If rate increased by 25%,
 		 *	assume slow start, rcvwin = 3 * copied
@@ -655,6 +679,10 @@ void tcp_rcv_space_adjust(struct sock *sk)
 
 			/* Make the window clamp follow along.  */
 			tp->window_clamp = tcp_win_from_space(rcvbuf);
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+      if (rdn_dropped) 
+        mpcb->cnt_rcv_redundant_skb = 0;
+#endif
 		}
 	}
 	tp->rcvq_space.space = copied;
@@ -2963,6 +2991,19 @@ static bool tcp_ack_update_rtt(struct sock *sk, const int flag,
 	if (seq_rtt_us < 0)
 		return false;
 
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  /* for raven, we collect sample for every RTT observed. 
+   * in future, once failed to add, it will return -ENOBUFS
+   */
+  if (flag & FLAG_ACKED) {
+    if (likely(mptcp(tp) && sysctl_mptcp_raven_collect_samples))
+		{
+			struct mptcp_options_received *mopt = &tp->mptcp->rx_opt;
+			mptcp_raven_pim(sk, mopt->data_ack, seq_rtt_us, 0);
+    }
+  }
+#endif
+
 	/* ca_rtt_us >= 0 is counting on the invariant that ca_rtt_us is
 	 * always taken together with ACK, SACK, or TS-opts. Any negative
 	 * values will be skipped with the seq_rtt_us < 0 check above.
@@ -4206,6 +4247,20 @@ static void tcp_send_dupack(struct sock *sk, const struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* FIXME: check discard at tcp_data_queue & discard even when it's
+	 * queued? 
+	 **/
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  if (mptcp(tp)) 
+  {
+    if (raven_debug_input(tp))
+			pr_emerg("[%s] dupack pi %u, seq %u, "
+					"rcv_wup %u, rcv_nxt %u, rcv_wnd %u\n", __func__,
+					tp->mptcp->path_index, TCP_SKB_CB(skb)->seq,
+					tp->rcv_wup, tp->rcv_nxt, tcp_receive_window(tp));
+  }
+#endif
+
 	if (TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq &&
 	    before(TCP_SKB_CB(skb)->seq, tp->rcv_nxt)) {
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_DELAYEDACKLOST);
@@ -4714,6 +4769,18 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	bool fragstolen;
 	int eaten;
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  struct sock *meta_sk;
+  struct tcp_sock *meta_tp;
+  bool track_drop = true;
+  u32 dseq = 0;
+  u32 dack = 0;
+  struct mptcp_cb *mpcb;
+  bool rdn_detected = false;
+
+  u64 tmp_bytes_received;
+  u64 tmp_rcv_nxt;
+#endif
 
 	/* If no data is present, but a data_fin is in the options, we still
 	 * have to call mptcp_queue_skb later on. */
@@ -4730,6 +4797,113 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 
 	tp->rx_opt.dsack = 0;
 
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  /* checks rdn data is out-of-order for subflow TCP level but is
+   * correct in MPTCP meta level:
+   *   meta_tp->rcv_nxt <= data_seq
+   * Then, the skb is processed in mptcp_data_ready  
+   * in equal case, skb is injected to meta recv queue 
+   * in bigger case, skb is injected to meta recv ofo queue to process
+   * it later
+   */
+  if (mptcp(tp) &&  (TCP_SKB_CB(skb)->seq != tp->rcv_nxt)) 
+  {
+    meta_sk = mptcp_meta_sk(sk);
+    meta_tp = mptcp_meta_tp(tp);
+    mpcb = meta_tp->mpcb;
+
+    /* Logic:
+     * if skb < meta rcv_nxt  
+     * ==> already received, drop it
+     *
+     * if meta rcv_nxt < skb   
+     * ==> put SKB into Meta’s OFO queue 
+     * (mptcp_add_meta_ofo_queue)
+     *
+     * if meta rcv_nxt == skb
+     * ==> put SKB into subflow’s receive queue & move to meta’s
+     * receive queue later.  
+     **/
+		// FIXME: check the scheduler is raven. Currently, we just assume
+		// that if the module is loaded, it's raven.
+    if (likely(mpcb))
+    {
+      dseq = mptcp_get_skb_dseq(skb);
+      dack = mptcp_get_skb_dack(skb);
+
+      if (raven_debug_input(tp))
+        pr_emerg("[%s] pi %u, len %u, seq %u, rcv_nxt %u, cseq %u, dseq %u, "
+            "meta-rcv_nxt %u, rdn %s\n", __func__, tp->mptcp->path_index,
+            /* (u32)tp->bytes_received, */ 
+            skb->len, TCP_SKB_CB(skb)->seq,
+            tp->rcv_nxt, tp->copied_seq, dseq, meta_tp->rcv_nxt, 
+            (skb->rcved_rdn ? "T" : "F")
+            );
+
+      if (dseq == meta_tp->rcv_nxt) 
+			{
+        if (raven_debug_input(tp))
+        pr_crit(">> correct pi %u, dseq %u, len %u, mdseq %u, rcv_nxt %u, rdn %s\n",
+            tp->mptcp->path_index, dseq, skb->len,
+            (u32)tp->mptcp->map_data_seq, meta_tp->rcv_nxt, 
+            (skb->rcved_rdn ? "T" : "F")
+            );
+      } else if (after(dseq, meta_tp->rcv_nxt)) 
+			{
+        if (raven_debug_input(tp))
+          pr_emerg("[%s] meta's OFO pi %u [seq %u, ack %u, rnxt %u], "
+              "dseq %u, dack %u, len %u, "
+              "meta [snd_una %u, rcv_nxt %u], "
+              "rdn %s"
+              "\n",
+              __func__, tp->mptcp->path_index, 
+              TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->ack_seq, 
+              tp->rcv_nxt, dseq, dack, skb->len,
+              meta_tp->snd_nxt, meta_tp->rcv_nxt,
+              (skb->rcved_rdn ? "T" : "F")
+              );
+
+#if 0
+        TCP_SKB_CB(skb)->seq = dseq;
+        TCP_SKB_CB(skb)->end_seq = dseq + skb->len;
+        skb_orphan(skb);
+        tcp_data_queue_ofo(meta_sk, skb);
+
+        /* tcp_send_ack(sk); */
+        if (skb->len || mptcp_is_data_fin(skb))
+          tcp_event_data_recv(sk, skb);
+        if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+          tcp_fin(sk);
+        goto skip_ofo_queue;
+#endif
+      } else if (before(dseq, meta_tp->rcv_nxt)) { 
+        if (raven_debug_input(tp))
+          pr_emerg("[%s] dup rcv pi %u [seq %u, ack %u, rnxt %u], "
+              "dseq %u, dack %u, len %u, "
+              "meta [snd_una %u, rcv_nxt %u]\n",
+              __func__, tp->mptcp->path_index, 
+              TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->ack_seq, 
+              tp->rcv_nxt, dseq, dack, skb->len,
+              meta_tp->snd_nxt, meta_tp->rcv_nxt);
+
+        if (tp->copied_seq < TCP_SKB_CB(skb)->end_seq)
+          tp->copied_seq = TCP_SKB_CB(skb)->end_seq;
+        if (tp->rcv_nxt < TCP_SKB_CB(skb)->end_seq)
+          tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+
+        /* tcp_send_ack(sk); */
+        if (skb->len || mptcp_is_data_fin(skb))
+          tcp_event_data_recv(sk, skb);
+        if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+          tcp_fin(sk);
+        goto drop;
+      }
+    } /* if redundancy */
+  } /* if mptcp */
+#endif /* CONFIG_MPTCP_3AVEN */
+
+
+
 	/*  Queue data for delivery to the user.
 	 *  Packets in sequence go to the receive queue.
 	 *  Out of sequence packets to the out_of_order_queue.
@@ -4745,8 +4919,31 @@ queue_and_out:
 		else if (tcp_try_rmem_schedule(sk, skb, skb->truesize))
 			goto drop;
 
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+      if (rdn_detected) { 
+        tmp_bytes_received = tp->bytes_received;
+        tmp_rcv_nxt = tp->rcv_nxt;
+      }
+#endif
+
 		eaten = tcp_queue_rcv(sk, skb, 0, &fragstolen);
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+    if (rdn_detected && tmp_rcv_nxt && tmp_bytes_received) 
+		{
+      tp->bytes_received = tmp_bytes_received;
+      tp->rcv_nxt = tmp_rcv_nxt;
+    }
+#endif
 		tcp_rcv_nxt_update(tp, TCP_SKB_CB(skb)->end_seq);
+
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+    if (rdn_detected && tmp_rcv_nxt && tmp_bytes_received) {
+      tp->bytes_received = tmp_bytes_received;
+      tp->rcv_nxt = tmp_rcv_nxt;
+			sk->sk_data_ready(sk);
+      return;
+    }
+#endif
 		if (skb->len || mptcp_is_data_fin(skb))
 			tcp_event_data_recv(sk, skb);
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
@@ -4787,6 +4984,14 @@ out_of_window:
 		tcp_enter_quickack_mode(sk, TCP_MAX_QUICKACKS);
 		inet_csk_schedule_ack(sk);
 drop:
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  if (mptcp(tp) && skb && track_drop) {
+    if (raven_debug_input(tp))
+      pr_emerg("[%s] pi %u, dropping skb seq %u\n", __func__,
+          tp->mptcp->path_index, dseq);
+		tcp_enter_quickack_mode(sk, TCP_MAX_QUICKACKS);
+  }
+#endif
 		tcp_drop(sk, skb);
 		return;
 	}
@@ -5183,6 +5388,13 @@ static inline void tcp_data_snd_check(struct sock *sk)
 static void __tcp_ack_snd_check(struct sock *sk, int ofo_possible)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  /* struct sock *tmpsk; */
+	struct sock *meta_sk = mptcp(tp) ? mptcp_meta_sk(sk) : sk;
+	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
+  struct mptcp_cb *mpcb = meta_tp->mpcb;
+  /* u8 pi; */
+#endif
 
 	    /* More than one full frame received... */
 	if (((tp->rcv_nxt - tp->rcv_wup) > inet_csk(sk)->icsk_ack.rcv_mss &&
@@ -5196,6 +5408,12 @@ static void __tcp_ack_snd_check(struct sock *sk, int ofo_possible)
 	    (ofo_possible && !RB_EMPTY_ROOT(&tp->out_of_order_queue))) {
 		/* Then ack it now */
 		tcp_send_ack(sk);
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+	// FIXME: check the scheduler is raven. Currently, we just assume
+	// that if the module is loaded, it's raven.
+  } else if (likely(mptcp(tp) && mpcb )) {
+		tcp_send_ack(sk);
+#endif
 	} else {
 		/* Else, send delayed ack. */
 		tcp_send_delayed_ack(sk);
@@ -5365,6 +5583,53 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 		 * an acknowledgment should be sent in reply (unless the RST
 		 * bit is set, if so drop the segment and return)".
 		 */
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+    if (mptcp(tp)) 
+    {
+      /* This happens during a subflow is disconnected, data has been
+       * transmitted over other subflows. 
+       * Why?  In sender's redundant queue, skbs that have been acked
+       * are removed, and subflow fails to validate seq number at
+       * **TCP** level. 
+       * ex.
+       *  |A|B|C|D|.....|L|M|N|O|
+       * subflow 1&2 redundantly sent up to B. 
+       * while subflow 2 gets disconnected, subflow 1 transmitted up L
+       * subflow 2 gets connected.
+       * subflow 1&2 redundantly sends M - O
+       * subflow 2's TCP level sequence validation fails b/c
+       *  -> subflow 2 never received C - L. 
+       *  -> sends dupack to receive from C to L.
+       * sender's redundant queue does NOT hold C to L. 
+       * instead, transmits M again.
+       * Loop happens b/w sender and receiver.
+       *
+       * Solution:
+       * when TCP level validation fails, checks meta's rcv_nxt is
+       * same as what this subflow should receive. 
+       * If not, get missing seq # 
+       *  (missing = meta's rcv_nxt - skb's seq)
+       * Move forward subflow's rcv_nxt
+       *  (sub's rcv_nxt += missing)
+       */
+        u32 dseq = mptcp_get_skb_dseq(skb);
+        u32 dack = mptcp_get_skb_dack(skb);
+        struct tcp_sock *meta_tp = mptcp_meta_tp(tp);
+
+      if (raven_debug_input(tp))
+        pr_emerg("[%s] discard pi %u "
+            "[seq %u, rwup %u, rnxt %u, rwnd %u], "
+            "dseq %u, dack %u, meta [suna %u, snxt %u rwup %u, rnxt %u]\n"
+            ,__func__, tp->mptcp->path_index, TCP_SKB_CB(skb)->seq,
+            tp->rcv_wup, tp->rcv_nxt, tcp_receive_window(tp),
+            dseq, dack,
+            meta_tp->snd_una, meta_tp->snd_nxt, 
+            meta_tp->rcv_wup, meta_tp->rcv_nxt
+            );
+    }
+#endif /* CONFIG_MPTCP_RAVEN */
+
+
 		if (!th->rst) {
 			if (th->syn)
 				goto syn_challenge;

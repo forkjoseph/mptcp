@@ -455,6 +455,10 @@ struct tcp_sock {
 	u64		mptcp_loc_key;
 	char		mptcp_sched_name[MPTCP_SCHED_NAME_MAX];
 	char		mptcp_pm_name[MPTCP_PM_NAME_MAX];
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+	/* Upto this seq, pkts been sent over ALL subflows */
+ 	u32	redundant_snd_nxt;	
+#endif /* CONFIG_MPTCP_RAVEN */
 #endif /* CONFIG_MPTCP */
 };
 

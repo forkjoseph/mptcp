@@ -371,13 +371,15 @@ struct mptcp_cb {
 	struct tcp_info	*master_info;
 #if IS_ENABLED(CONFIG_MPTCP_RAVEN)
   /* red skb from write_queue */ 
-	struct sk_buff_head rdn_write_queue;
+	struct sk_buff_head raven_write_queue;
+
   /* red skb from redundant_write_queue that have been already sent */ 
-	struct sk_buff_head rdn_rtx_queue;
+	struct sk_buff_head raven_rtx_queue;
+
+  struct sk_buff_head raven_storage_queue;
 	spinlock_t  rdn_lock;
-  u32 cnt_rdn_skb;
-  u32 cnt_rcv_rdn_skb;
-  struct sk_buff_head rdn_storage_queue;
+  u32 cnt_redundant_skb;
+  u32 cnt_rcv_redundant_skb;
 
   /* exp --> TODO: remove this for release */
   u32 rdn_init_seq;

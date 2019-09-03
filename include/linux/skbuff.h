@@ -831,6 +831,14 @@ struct sk_buff {
 	/* private: */
 	__u32			headers_end[0];
 	/* public: */
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+	u8 cnt_redundant;
+	u8 redundant_path_mask;
+	u8 redundant_target_pis;
+	struct tcp_sock *redundant_next_subflow;
+	bool redundant_reinjected;
+	bool rcved_rdn;
+#endif
 
 	/* These elements must be at the end, see alloc_skb() for details.  */
 	sk_buff_data_t		tail;

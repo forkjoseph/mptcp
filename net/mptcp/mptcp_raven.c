@@ -4,15 +4,14 @@
  * This is from the implementation of MPTCP RAVEN scheduler in
  * HyunJong Lee, Jason Flinn, and Basavaraj Tonsha,
  *  "RAVEN: Improving Interactive Latency for the Connected Car"
- *  in MobiCom ’18: 24th Annual International Conference on Mobile
- *  Computing and Networking, October 2018.
+ * in MobiCom ’18: 24th Annual International Conference on Mobile
+ * Computing and Networking, October 2018.
  * Available from:
  *  http://leelabs.org/pubs/mobicom18_raven.pdf
  */
  
 #include <net/mptcp.h>
 #include <net/mptcp_raven_stale_table.h>
-/* #include <net/paperstat.h> */
 
 /* #define FLIPFLOP 1 */
 #define ENABLE_AGING 1
@@ -23,11 +22,9 @@
 /* #define CASE 3 */
 /* #define CASE 4 */
 
-/* for probing */
 static bool has_been_est;
 static unsigned int has_been_sent;
 
-static bool iamserver = false;
 static int target_case = 0;
 static int target_ci = 0;
 #if defined(FLIPFLOP) && FLIPFLOP
@@ -159,6 +156,22 @@ struct raven_sock_data {
 }; 
 
 #define pi_to_flag(sk) mptcp_pi_to_flag(mptcp_path_index(sk))
+u8 mptcp_path_index(const struct sock *sk)
+{
+	return tcp_sk(sk)->mptcp->path_index;
+}
+
+int mptcp_dont_reinject_skb(const struct tcp_sock *tp, 
+		const struct sk_buff *skb)
+{
+	return skb && 
+		mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask;
+}
+
+bool mptcp_is_reinjected(const struct sk_buff *skb)
+{
+	return TCP_SKB_CB(skb)->mptcp_flags & MPTCP_REINJECT;  
+}
 
 bool mptcp_snd_wnd_test(const struct tcp_sock *tp, 
     const struct sk_buff *skb, unsigned int cur_mss);
@@ -190,19 +203,19 @@ static struct sock *get_valid_next_subflow(struct sk_buff *skb,
    * jump to get_next_subflow
    */
 get_next_subflow:
-  tp = skb->rdn_next_subflow;
+  tp = skb->redundant_next_subflow;
   sk = (struct sock *) tp;
 
   if (!sk) 
     goto assign_next;
 
-  if (!tp->mptcp || !skb->rdn_target_pis) {
+  if (!tp->mptcp || !skb->redundant_target_pis) {
     /* pr_emerg("[%s] rdn_target %u, pi XX, seq %u, \n", __func__, */
-    /*     skb->rdn_target_pis, TCP_SKB_CB(skb)->seq); */
+    /*     skb->redundant_target_pis, TCP_SKB_CB(skb)->seq); */
     goto fail;
   } 
 
-  /* sk := rdn_next_subflow,
+  /* sk := redundant_next_subflow,
    * if sk valid target?
    *    if sk is NOT wifi? 
    *      return sk
@@ -212,16 +225,16 @@ get_next_subflow:
    *    return sk
    */
   pi_bit = mptcp_pi_to_flag(mptcp_path_index(sk));
-  done_pi = skb->rdn_path_mask;
+  done_pi = skb->redundant_path_mask;
 
   /* pr_emerg("target %u, pi %u, done %u\n", */ 
-  /*     skb->rdn_target_pis, pi_bit,  done_pi); */
+  /*     skb->redundant_target_pis, pi_bit,  done_pi); */
 
-  if ((skb->rdn_target_pis & pi_bit)) {
+  if ((skb->redundant_target_pis & pi_bit)) {
     /* if not wifi? np! */
     /* if (!nowifi(sk, skb)) { */
     /*   /1* pr_emerg("target %u, pi %u, done %u\n", *1/ */ 
-    /*   /1*     skb->rdn_target_pis, pi_bit,  done_pi); *1/ */
+    /*   /1*     skb->redundant_target_pis, pi_bit,  done_pi); *1/ */
 
     /*   /1* haven't been sent over yet *1/ */
     /*   if (!(done_pi & pi_bit)) */
@@ -232,22 +245,22 @@ get_next_subflow:
       done_pi |= pi_bit;
 
       /* only wifi is left?! */
-      if (done_pi == skb->rdn_target_pis)
+      if (done_pi == skb->redundant_target_pis)
         goto bye;
     }
   }
 
   /* pr_emerg("[%s] pi %u is not valid (target %u)\n", __func__, */
   /*     mptcp_path_index(sk), */ 
-  /*     skb->rdn_target_pis); */
+  /*     skb->redundant_target_pis); */
 
 assign_next:
   if (sk && tp->mptcp ) { 
-    skb->rdn_next_subflow = tp->mptcp->next;
+    skb->redundant_next_subflow = tp->mptcp->next;
   }
 
-  if (!skb->rdn_next_subflow) 
-    skb->rdn_next_subflow = mpcb->connection_list;
+  if (!skb->redundant_next_subflow) 
+    skb->redundant_next_subflow = mpcb->connection_list;
   cnt++;
   if (cnt++ > 10)
     goto fail;
@@ -256,7 +269,7 @@ assign_next:
 bye:
 #if 0 
   pr_emerg("[%s] rdn_target %u, pi %2u, seq %u\n", __func__,
-      skb->rdn_target_pis, mptcp_path_index(sk),
+      skb->redundant_target_pis, mptcp_path_index(sk),
       TCP_SKB_CB(skb)->seq);
 #endif 
   return sk;
@@ -298,13 +311,13 @@ struct sk_buff *mptcp_dcm_enqueue_rdn_skb(struct sk_buff *orig_skb,
   }
 
   /* assuming sending via meta */
-  skb->cnt_rdn = tmp;
-  orig_skb->cnt_rdn = tmp;
+  skb->cnt_redundant = tmp;
+  orig_skb->cnt_redundant = tmp;
 
   /* subflow_pis ^= mptcp_pi_to_flag(mptcp_path_index(sk)); */
 
-  skb->rdn_target_pis = subflow_pis;
-  orig_skb->rdn_target_pis = subflow_pis;
+  skb->redundant_target_pis = subflow_pis;
+  orig_skb->redundant_target_pis = subflow_pis;
 
   /* advance original skb to original version of cloned skb 
    * points next skb to send. Note that by setting reinject > 1,
@@ -319,20 +332,20 @@ struct sk_buff *mptcp_dcm_enqueue_rdn_skb(struct sk_buff *orig_skb,
   TCP_SKB_CB(orig_skb)->mptcp_flags |= MPTCP_REDUNDANT;
   TCP_SKB_CB(skb)->mptcp_flags |= MPTCP_REDUNDANT;
   memset(TCP_SKB_CB(skb)->dss, 0,  mptcp_dss_len);
-  skb->rdn_reinjected = false;
-  orig_skb->rdn_reinjected = false;
+  skb->redundant_reinjected = false;
+  orig_skb->redundant_reinjected = false;
 
   /* 1) assign next subflow to send over
    * 2) put rdn_skb to red_write_queue
    */
 /* assign_next_subflow: */
-  skb->rdn_next_subflow = tp->mptcp->next;
-  if (!skb->rdn_next_subflow) {
-    skb->rdn_next_subflow = mpcb->connection_list;
+  skb->redundant_next_subflow = tp->mptcp->next;
+  if (!skb->redundant_next_subflow) {
+    skb->redundant_next_subflow = mpcb->connection_list;
   }
 
-  skb_queue_tail(&mpcb->rdn_write_queue, skb);
-  mpcb->cnt_rdn_skb++;
+  skb_queue_tail(&mpcb->raven_write_queue, skb);
+  mpcb->cnt_redundant_skb++;
 
   if ((TCP_SKB_CB(orig_skb)->tcp_flags & TCPHDR_PSH))
     TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
@@ -343,8 +356,8 @@ struct sk_buff *mptcp_dcm_enqueue_rdn_skb(struct sk_buff *orig_skb,
   eseq = TCP_SKB_CB(skb)->end_seq;
   if (unlikely(sysctl_mptcp_dcm_debug))
     mptcp_debug("[%s] redundant queue %u, len %u [%u - %u], curr %u, spi %u\n",
-        __func__, skb_queue_len(&mpcb->rdn_write_queue), skb->len,
-        seq, eseq, atomic_read(&skb->cnt_rdn),   skb->rdn_target_pis
+        __func__, skb_queue_len(&mpcb->raven_write_queue), skb->len,
+        seq, eseq, atomic_read(&skb->cnt_redudnant),   skb->redundant_target_pis
       );
 #endif 
 
@@ -742,33 +755,24 @@ struct sock *get_rdn_subflow(struct mptcp_cb *mpcb,
 
   int preventloop = 0;
   ktime_t now_ts;
-  u16 port;
 
   if (unlikely(!skb)) {
     return (struct sock *)mpcb->connection_list;
   }
 
-  if (iamserver)
-    port = ntohs(isk->inet_sport);
-  else
-    port = ntohs(isk->inet_dport);
-
-  now_ts = ktime_get();
-
   /* if (mptcp_is_skb_redundant(skb)) { */
   /*   u32 seq, eseq; */
   /*   seq = TCP_SKB_CB(skb)->seq; */
   /*   eseq = TCP_SKB_CB(skb)->end_seq; */
-  /*   pr_crit("[%s] pi n/a, cnt_rdn %d, " */
+  /*   pr_crit("[%s] pi n/a, cnt_redudnant %d, " */
   /*       "seq %u, eseq %u, pm %u, len %u, " */
-  /*       "meta [snd_una %u, snt_nxt %u, rdn_snd_nxt %u]\n" */
+  /*       "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u]\n" */
   /*       , __func__, */ 
-  /*       skb->cnt_rdn, seq, eseq, TCP_SKB_CB(skb)->path_mask, skb->len, */
-  /*       meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->rdn_snd_nxt); */
+  /*       skb->cnt_redudnant, seq, eseq, TCP_SKB_CB(skb)->path_mask, skb->len, */
+  /*       meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt); */
   /* } */
 
-  /* if (port == 48081)  // flipflop on data-flow only */
-  if (sysctl_mptcp_dcm_measure) 
+  if (sysctl_mptcp_raven_measure) 
   {
 #if defined(FLIPFLOP) && FLIPFLOP
   int avail_subflows = mpcb->cnt_subflows;
@@ -860,7 +864,7 @@ struct sock *get_rdn_subflow(struct mptcp_cb *mpcb,
     /* reinject on exact sample pi */
     mptcp_for_each_sk(mpcb, sk) {
       struct tcp_sock *tp = tcp_sk(sk);
-      int tmp_cnt_rdn = 0;
+      int tmp_cnt_redundant = 0;
       if (!mptcp_sk_can_send(sk)) 
         continue;
 
@@ -869,7 +873,7 @@ struct sock *get_rdn_subflow(struct mptcp_cb *mpcb,
       {
     
         if (!nowifi(sk, skb)) {
-            skb->cnt_rdn = tmp_cnt_rdn;
+            skb->cnt_redundant = tmp_cnt_redundant;
             return sk;
         }
       } else 
@@ -877,20 +881,20 @@ struct sock *get_rdn_subflow(struct mptcp_cb *mpcb,
       { 
         if (TCP_SKB_CB(skb)->path_mask &
             mptcp_pi_to_flag(tp->mptcp->path_index)) 
-        skb->cnt_rdn = tmp_cnt_rdn;
+        skb->cnt_redundant = tmp_cnt_redundant;
         return sk;
       }
     }
   }
 
   /* skb is from redundancy write queue? 
-   * return next subflow to send redudant data.
+   * return next subflow to send redundant data.
    */ 
   if (mptcp_is_skb_redundant(skb)) 
   {
     struct tcp_sock *tp;
 rdn_detected:
-    bestsk = (struct sock *) skb->rdn_next_subflow;
+    bestsk = (struct sock *) skb->redundant_next_subflow;
     tp = tcp_sk(bestsk);
 
     if (likely(bestsk && tp->mptcp))
@@ -906,7 +910,7 @@ rdn_detected:
                 mptcp_path_index(bestsk),
                 mptcp_path_index((struct sock *) tp->mptcp->next),
                 mpcb->cnt_established);
-            skb->rdn_next_subflow = tp->mptcp->next;
+            skb->redundant_next_subflow = tp->mptcp->next;
           } else {
             pr_emerg("subflow %u is not fully est. no next \n", mptcp_path_index(bestsk));
           }
@@ -915,8 +919,8 @@ rdn_detected:
       } /* not fully est */
 
       /* leave a mark to say skb has been sent over which subflows */
-      skb->rdn_path_mask |= mptcp_pi_to_flag(mptcp_path_index(bestsk));
-      skb->rdn_next_subflow = tp->mptcp->next;
+      skb->redundant_path_mask |= mptcp_pi_to_flag(mptcp_path_index(bestsk));
+      skb->redundant_next_subflow = tp->mptcp->next;
 
       if (mptcp_is_reinjected(skb))
         TCP_SKB_CB(skb)->mptcp_flags ^= MPTCP_REDUNDANT;
@@ -932,13 +936,13 @@ rdn_detected:
 
       pr_crit("[%s] fix? rdn %s, "
         "seq %u, len %u, pm %u, rpm %u, "
-        "meta [snd_una %u, snt_nxt %u, rdn_snd_nxt %u], "
+        "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u], "
         "wqueue %u"
         "\n"
         , __func__, (mptcp_is_skb_redundant(skb) ? "T" : "F"),
         TCP_SKB_CB(skb)->seq, skb->len, 
-        TCP_SKB_CB(skb)->path_mask, skb->rdn_path_mask, 
-        meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->rdn_snd_nxt,
+        TCP_SKB_CB(skb)->path_mask, skb->redundant_path_mask, 
+        meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt,
         tmpskb_seq
         );
       return NULL;
@@ -949,18 +953,13 @@ rdn_detected:
   /*   return get_generic_subflow(mpcb, skb, &constr_selector, zwnd_test, force); */
 
   /* at this point, skb must only be from meta's write queue */
-  if (!sysctl_mptcp_dcm_collect_samples) { 
+  if (!sysctl_mptcp_raven_collect_samples) { 
     /* blind redundancy */
     mptcp_for_each_sk(mpcb, sk) {
       struct tcp_sock *tp = tcp_sk(sk);
       if (!mptcp_sk_can_send(sk)) 
         continue;
-#if 0
-      if ((mpcb->dcm_policy->redundancy) && (tp->snd_cwnd > (UINT_MAX / 2)))
-          tp->snd_cwnd = 10;
-#endif
-
-      target_subflow_pis |= mptcp_pi_to_flag(mptcp_path_index(sk));
+      target_subflow_pis |= mptcp_pi_to_flag(tp->mptcp->path_index);
     }
 
     if (target_subflow_pis) {
@@ -1058,8 +1057,6 @@ rdn_detected:
       struct tcp_sock *tp = tcp_sk(sk);
       u64 low = tp->mptcp->stat.pi_low;
       u64 high = tp->mptcp->stat.pi_high;
-      /* if (dcm_check_net_types(sk, tmp_cfglist, MPTCP_DCM_NET_TYPE_WIFI)) */ 
-      /*   continue; */
 
       /* first, dont' consider [0, inf] case */
       if (low > 0 && low < min_low) {
@@ -1160,26 +1157,18 @@ filter_subflows:
     if (!mptcp_dont_reinject_skb(tp, skb))
       unused = true;
 
-#if 1
     if (dcm_mptcp_is_temp_unavailable(sk, skb, zwnd_test)) {
       /* pr_crit("[%s] subflow %u is temp unavailable\n", __func__, */
       /*     mptcp_path_index(sk)); */
       /* if (!blind_redundancy) { */ 
-        /* if (!nowifi(sk, skb)) */ 
         /*   continue; */
       /* } */
       continue;
     }
-#endif
 
     if (tp->srtt_us < min_srtt) {
-      if (blind_redundancy ) { // && !nowifi(sk, skb)) {
+      if (blind_redundancy ) {
         bestsk = sk;
-      /* } else { */ 
-        /* if (!nowifi(sk, skb)) { */
-        /*   min_srtt = tp->srtt_us; */
-        /*   bestsk = sk; */
-        /* } */
       }
     }
 
@@ -1199,8 +1188,8 @@ filter_subflows:
       /* pr_crit("potential bug... subflow skb %u, snd_una %u, snd_nxt %u, " */
       /*     "rdn_sndnxt %u, loop %u, pm %u, rpm %u, rdn %s", */
       /*     TCP_SKB_CB(skb)->seq, meta_tp->snd_una, meta_tp->snd_nxt, */
-      /*     meta_tp->rdn_snd_nxt, preventloop, */ 
-      /*     TCP_SKB_CB(skb)->path_mask, skb->rdn_path_mask, */
+      /*     meta_tp->redundant_snd_nxt, preventloop, */ 
+      /*     TCP_SKB_CB(skb)->path_mask, skb->redundant_path_mask, */
       /*     (mptcp_is_skb_redundant(skb) ? "T" : "F") */
       /*     ); */
 
@@ -1259,15 +1248,15 @@ filter_subflows:
 
     if (likely(bestsk)) {
       int set_cntrdn = 0;
-      /* atomic_set(&skb->cnt_rdn, set_cntrdn); */
-      skb->cnt_rdn = set_cntrdn;
+      /* atomic_set(&skb->cnt_redundant, set_cntrdn); */
+      skb->cnt_redundant = set_cntrdn;
       /* pr_crit("[%s] one subflow is available pi bit %u, seq %u, len %4u, " */
-      /*     "snd_una %u, snd_nxt %u, rdn_snd_nxt %u\n", __func__, */
+      /*     "snd_una %u, snd_nxt %u, redundant_snd_nxt %u\n", __func__, */
       /*     subflow_pis, TCP_SKB_CB(skb)->seq, skb->len, */
       /*     tcp_sk(meta_sk)->snd_una, tcp_sk(meta_sk)->snd_nxt, */
-      /*     tcp_sk(meta_sk)->rdn_snd_nxt); */
+      /*     tcp_sk(meta_sk)->redundant_snd_nxt); */
 
-      tcp_sk(mptcp_meta_sk(bestsk))->rdn_snd_nxt = TCP_SKB_CB(skb)->end_seq;
+      tcp_sk(mptcp_meta_sk(bestsk))->redundant_snd_nxt = TCP_SKB_CB(skb)->end_seq;
     } else {
       /* pr_crit("[%s] one subflow is available pi bit %u, skb %u\n", __func__, */
       /*     subflow_pis, TCP_SKB_CB(skb)->seq); */
@@ -1301,11 +1290,11 @@ filter_subflows:
         return NULL;
 
       /* you know, just another logging */
-      skb->rdn_path_mask |= mptcp_pi_to_flag(tcp_sk(bestsk)->mptcp->path_index);
-      rdn_skb->rdn_path_mask |= mptcp_pi_to_flag(tcp_sk(bestsk)->mptcp->path_index);
+      skb->redundant_path_mask |= mptcp_pi_to_flag(tcp_sk(bestsk)->mptcp->path_index);
+      rdn_skb->redundant_path_mask |= mptcp_pi_to_flag(tcp_sk(bestsk)->mptcp->path_index);
 
       /* to handle networks w/ different speed */
-      tcp_sk(mptcp_meta_sk(bestsk))->rdn_snd_nxt = TCP_SKB_CB(skb)->end_seq;
+      tcp_sk(mptcp_meta_sk(bestsk))->redundant_snd_nxt = TCP_SKB_CB(skb)->end_seq;
 
       return bestsk;
     }
@@ -1431,7 +1420,7 @@ static struct sk_buff *__dcm_next_segment(struct sock *meta_sk, int *reinject, i
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
 	struct sk_buff *skb = NULL;
   struct sk_buff *tmp_skb;
-  int cnt_rdn = -1; 
+  int cnt_redundant = -1; 
   u8 pm = 0;
   bool unused_found = false;
   bool from_rdn_wqueue = false;
@@ -1449,13 +1438,13 @@ static struct sk_buff *__dcm_next_segment(struct sock *meta_sk, int *reinject, i
     /* MICRO: benefit of Raven in kernel */
     /* if (before(meta_tp->snd_una, TCP_SKB_CB(skb)->seq) && meta_tp->snd_una != seq)  */
     if (meta_tp->snd_una > TCP_SKB_CB(skb)->seq &&
-        seq <= meta_tp->rdn_snd_nxt &&seq <= meta_tp->snd_nxt) 
+        seq <= meta_tp->redundant_snd_nxt &&seq <= meta_tp->snd_nxt) 
     {
 #if 1
 #if 1
       /* pr_emerg("[%s] dcm seq %u freed, snd_una %u, snd_nxt %u, " */
       /*     "snd_rdn_nxt %u, rdn? %s\n", __func__, seq, meta_tp->snd_una, */
-      /*     meta_tp->snd_nxt, meta_tp->rdn_snd_nxt, */ 
+      /*     meta_tp->snd_nxt, meta_tp->redundant_snd_nxt, */ 
       /*     (mptcp_is_skb_redundant(skb) ? "T" : "F")); */
 #endif
 #if 0
@@ -1470,11 +1459,11 @@ static struct sk_buff *__dcm_next_segment(struct sock *meta_sk, int *reinject, i
 #if 1
     /* pr_crit("[%s] from rqueue: rdn %s, " */
     /*   "seq %u, len %u, pm %u, rpm %u, " */
-    /*   "meta [snd_una %u, snt_nxt %u, rdn_snd_nxt %u]\n" */
+    /*   "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u]\n" */
     /*   , __func__, (mptcp_is_skb_redundant(skb) ? "T" : "F"), */
     /*   TCP_SKB_CB(skb)->seq, skb->len, */ 
-    /*   TCP_SKB_CB(skb)->path_mask, skb->rdn_path_mask, */ 
-    /*   meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->rdn_snd_nxt); */
+    /*   TCP_SKB_CB(skb)->path_mask, skb->redundant_path_mask, */ 
+    /*   meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt); */
     if (mptcp_is_skb_redundant(skb)) {
       __skb_unlink(skb, &mpcb->reinject_queue);
       kfree_skb(skb);
@@ -1484,9 +1473,9 @@ static struct sk_buff *__dcm_next_segment(struct sock *meta_sk, int *reinject, i
 #if 0 
   if (mpcb->dcm_policy->redundancy && sysctl_mptcp_dcm_measure) 
   {
-    if (!skb_queue_empty(&mpcb->rdn_write_queue)) 
+    if (!skb_queue_empty(&mpcb->raven_write_queue)) 
     {
-      if ( (tmp_skb = skb_peek(&mpcb->rdn_write_queue)) ) 
+      if ( (tmp_skb = skb_peek(&mpcb->raven_write_queue)) ) 
       {
         if (TCP_SKB_CB(tmp_skb)->seq < TCP_SKB_CB(skb)->seq)
           goto check_rwqueue;
@@ -1507,7 +1496,7 @@ check_rwqueue:
    * skb_peek returns *head* of redundant_queue. 
    * this is why we add at a tail of queue from enqueue operation.
    */
-  if ( (skb = skb_peek(&mpcb->rdn_write_queue)) ) {
+  if ( (skb = skb_peek(&mpcb->raven_write_queue)) ) {
     sk = get_valid_next_subflow(skb, mpcb);
     unused_found = false;
 
@@ -1528,28 +1517,28 @@ check_again:
       goto check_meta_wqueue;
     }
 
-    skb->cnt_rdn--;
-    cnt_rdn = skb->cnt_rdn;
-    *redundant = cnt_rdn;
+    skb->cnt_redundant--;
+    cnt_redundant = skb->cnt_redundant;
+    *redundant = cnt_redundant;
     from_rdn_wqueue = true;
-    pm = skb->rdn_path_mask;
+    pm = skb->redundant_path_mask;
 
-    if (!cnt_rdn && unused_found) {
+    if (!cnt_redundant && unused_found) {
       /* been sent over all subflows. move to rtx queue */
-      __skb_unlink(skb, &mpcb->rdn_write_queue);
+      __skb_unlink(skb, &mpcb->raven_write_queue);
 
       /* put dequeued rdn_skb into redundant_rtx_queue just 
        * in a case all rdn pkts over all subflows are lost.
        */
-      skb_queue_tail(&mpcb->rdn_rtx_queue, skb);
+      skb_queue_tail(&mpcb->raven_rtx_queue, skb);
 
       /* rdn_skb been sent all subflows,
        * tell meta_tp that ok to send next seg
        */
-      /* if (!skb->rdn_reinjected) */
+      /* if (!skb->redundant_reinjected) */
         meta_tp->snd_nxt = TCP_SKB_CB(skb)->end_seq;
     }
-    BUG_ON(cnt_rdn < -1);
+    BUG_ON(cnt_redundant < -1);
   } else {
     int cnt = 1;
 check_meta_wqueue:
@@ -1584,12 +1573,12 @@ out:
   /*   u32 seq, eseq; */
   /*   seq = TCP_SKB_CB(skb)->seq; */
   /*   eseq = TCP_SKB_CB(skb)->end_seq; */
-  /*   pr_crit("[%s] from %s: cnt_rdn %d, " */
+  /*   pr_crit("[%s] from %s: cnt_redudnant %d, " */
   /*       "seq %u, eseq %u, pm %u, len %u, " */
-  /*       "meta [snd_una %u, snt_nxt %u, rdn_snd_nxt %u]\n" */
+  /*       "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u]\n" */
   /*       , __func__, ( from_rdn_wqueue ? "rdn_wqueue" : "meta_wqueue"), */
-  /*       cnt_rdn, seq, eseq, pm, skb->len, */
-  /*       meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->rdn_snd_nxt); */
+  /*       cnt_redudnant, seq, eseq, pm, skb->len, */
+  /*       meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt); */
   /* } */
 #endif
 	return skb;
@@ -1606,7 +1595,6 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
 	u16 gso_max_segs;
 	u32 max_len, max_segs, window, needed;
   int redundant = 0;
-  struct inet_sock *isk = inet_sk(meta_sk);
   u16 port;
   bool returnnull = false;
 
@@ -1615,17 +1603,12 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
 	/* as we set it, we have to reset it as well. */
 	*limit = 0;
 
-  if (iamserver)
-    port = ntohs(isk->inet_sport);
-  else
-    port = ntohs(isk->inet_dport);
-
   /* /1* if (sysctl_mptcp_dcm_measure && mpcb && (mpcb->dcm_policy->redundancy)) { *1/ */
   /*     pr_emerg("[%s] qlen %u, %u, %u, snd_una %u, snd_nxt %u\n", */
   /*         __func__, */ 
   /*         skb_queue_len(&((meta_sk)->sk_write_queue)), */
-  /*         skb_queue_len(&mpcb->rdn_write_queue), */
-  /*         skb_queue_len(&mpcb->rdn_rtx_queue), */
+  /*         skb_queue_len(&mpcb->raven_write_queue), */
+  /*         skb_queue_len(&mpcb->raven_rtx_queue), */
   /*         meta_tp->snd_una, */
   /*         meta_tp->snd_nxt */
   /*         ); */
@@ -1659,8 +1642,8 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
     /* /1* if (sysctl_mptcp_dcm_measure) *1/ */ 
     /*   pr_emerg("[%s] returning NULL! (no more data - %u, %u, %u)\n", __func__, */
     /*       skb_queue_len(&((meta_sk)->sk_write_queue)), */
-    /*       skb_queue_len(&mpcb->rdn_write_queue), */
-    /*       skb_queue_len(&mpcb->rdn_rtx_queue) */
+    /*       skb_queue_len(&mpcb->raven_write_queue), */
+    /*       skb_queue_len(&mpcb->raven_rtx_queue) */
     /*       ); */
 		return NULL;
   }
@@ -1678,7 +1661,7 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
   }
 
 #if 0 // FIXME: later...
-  if (mpcb->dcm_policy->redundancy && sysctl_mptcp_dcm_collect_samples) 
+  if (mpcb->dcm_policy->redundancy && sysctl_mptcp_raven_collect_samples) 
   {
     if (!tcp_sk(*subsk)->mptcp->lambda) {
       struct raven_sock_data *rsd = raven_get_data(tcp_sk(*subsk));
@@ -1709,7 +1692,7 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
     goto out;
   }
 
-  redundant = skb->cnt_rdn;
+  redundant = skb->cnt_redundant;
   /* if (likely(mpcb->dcm_policy->redundancy) && */
   if (redundant >=0 &&
       likely(mptcp_is_skb_redundant(skb)) && !dcm_redundant_pi(skb, tcp_sk(*subsk)))
@@ -1728,7 +1711,7 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
           /* seq, eseq, meta_tp->snd_nxt - mpcb->rdn_init_seq, redundant, */
           seq, meta_tp->snd_nxt, redundant,
           skb_queue_len(&((meta_sk)->sk_write_queue)),
-          skb->rdn_path_mask,
+          skb->redundant_path_mask,
           *reinject
         );
 
@@ -1783,12 +1766,12 @@ out:
     eseq = TCP_SKB_CB(skb)->end_seq;
 #if 1
     /* /1* if (sysctl_mptcp_dcm_measure) *1/ */ 
-    /* pr_crit("[%s] pi %u, cnt_rdn %d, " */
+    /* pr_crit("[%s] pi %u, cnt_redudnant %d, " */
     /*     "seq %u, eseq %u, pm %u, len %u, " */
-    /*     "meta [snd_una %u, snt_nxt %u, rdn_snd_nxt %u] rj %u, wd %s\n" */
+    /*     "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u] rj %u, wd %s\n" */
     /*     , __func__,  mptcp_path_index(*subsk), */
-    /*     skb->cnt_rdn, seq, eseq, TCP_SKB_CB(skb)->path_mask, skb->len, */
-    /*     meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->rdn_snd_nxt, */
+    /*     skb->cnt_redudnant, seq, eseq, TCP_SKB_CB(skb)->path_mask, skb->len, */
+    /*     meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt, */
     /*     *reinject, */
     /*     !after(TCP_SKB_CB(skb)->end_seq, tcp_wnd_end(meta_tp)) ? "T" : "F" */
     /*     ); */
@@ -1843,18 +1826,18 @@ unsigned int mptcp_cwnd_test(const struct tcp_sock *tp,
 static void raven_release(struct sock *sk) 
 {
   struct tcp_sock *tp = tcp_sk(sk);
-  struct sk_buff_head *rdn_rtx_queue;
+  struct sk_buff_head *raven_rtx_queue;
   struct sk_buff *skb, *tmp;
 
   /* whichever that frees up late */
   if (tp->mpcb->cnt_established == 1) {
-    skb_queue_purge(&tp->mpcb->rdn_write_queue);
-    rdn_rtx_queue = &tp->mpcb->rdn_rtx_queue;
-    skb_queue_walk_safe(rdn_rtx_queue, skb, tmp) {
+    skb_queue_purge(&tp->mpcb->raven_write_queue);
+    raven_rtx_queue = &tp->mpcb->raven_rtx_queue;
+    skb_queue_walk_safe(raven_rtx_queue, skb, tmp) {
       if (skb) 
         kfree_skb(skb);
     }
-    skb_queue_purge(&tp->mpcb->rdn_storage_queue);
+    skb_queue_purge(&tp->mpcb->raven_storage_queue);
   }
   return;
 }
@@ -1875,7 +1858,7 @@ static void raven_sched_init(struct sock *sk)
   if (sk && tcp_sk(sk) && tcp_sk(sk)->mptcp) {
     meta_tp = mptcp_meta_tp(tcp_sk(sk));
     mpcb = tcp_sk(sk)->mpcb;
-    mpcb->cnt_rcv_rdn_skb = 0;
+    mpcb->cnt_rcv_redundant_skb = 0;
   }
 
   mpcb = tcp_sk(sk)->mpcb;
@@ -1958,8 +1941,7 @@ static int __init raven_register(void)
 	if (mptcp_register_scheduler(&mptcp_sched_raven)) 
     goto fail;
 
-  pr_emerg("[%s] trace d%d, CI %d, amIserver? %s\n", __func__,
-      CASE, CI_INT, (iamserver ? "T" : "F"));
+	pr_emerg("[%s] trace d%d, CI %d\n", __func__, CASE, CI_INT);
   return 0;
 fail:
   return -1;
@@ -1973,8 +1955,6 @@ static void __exit raven_unregister(void)
 module_init(raven_register);
 module_exit(raven_unregister);
 
-module_param(iamserver, bool, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-MODULE_PARM_DESC(iamserver, "tell i am server");
 module_param(target_case, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(target_case, "replay trace");
 module_param(target_ci, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
@@ -1982,5 +1962,5 @@ MODULE_PARM_DESC(target_ci, "confidence interval");
 
 MODULE_AUTHOR("Hyunjong Joseph Lee");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("MPTCP Raven scheduler");
+MODULE_DESCRIPTION("MPTCP RAVEN scheduler");
 MODULE_VERSION("0.93");

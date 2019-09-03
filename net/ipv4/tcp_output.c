@@ -2915,8 +2915,39 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 
 	if (before(TCP_SKB_CB(skb)->seq, tp->snd_una)) {
 		if (unlikely(before(TCP_SKB_CB(skb)->end_seq, tp->snd_una))) {
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+      struct sock *meta_sk = mptcp_meta_sk(sk);
+      struct tcp_sock *meta_tp = tcp_sk(meta_sk);
+      struct mp_dss *mpdss = (struct mp_dss *) TCP_SKB_CB(skb)->dss;
+      u32 *p32;
+      u32 dseq = 0;
+
+      if (mptcp_is_data_seq(skb)) {
+        /* Move the pointer to the data-seq */
+        p32 = (u32 *) mpdss;
+        p32++;
+        if (mpdss->A) {
+          p32++;
+          if (mpdss->a)
+            p32++;
+        }
+        dseq = ntohl(*p32);
+      }
+
+      pr_emerg("[%s] rtx pi %u, una %u, nxt %u, "
+          "meta [una %u, nxt %u, rnxt %u], "
+          "len %u, seq %u, eseq %u, dseq %u\n", __func__,
+					tp->mptcp->path_index, tp->snd_una, tp->snd_nxt, 
+          meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt,
+          skb->len, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, 
+          dseq
+          );
+			if (!( TCP_SKB_CB(skb)->mptcp_flags & MPTCP_REDUNDANT) )
+        BUG();
+#else
 			WARN_ON_ONCE(1);
 			return -EINVAL;
+#endif
 		}
 		if (tcp_trim_head(sk, skb, tp->snd_una - TCP_SKB_CB(skb)->seq))
 			return -ENOMEM;

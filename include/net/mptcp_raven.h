@@ -5,11 +5,11 @@
 #include <asm/uaccess.h>   // Needed by segment descriptors
 
 
-extern int sysctl_mptcp_dcm_enabled;
-extern int sysctl_mptcp_dcm_threshold;
-extern int sysctl_mptcp_dcm_collect_samples;
-extern int sysctl_mptcp_dcm_debug_raven;
-extern int sysctl_mptcp_dcm_measure;
+extern int sysctl_mptcp_raven_enabled;
+extern int sysctl_mptcp_raven_threshold;
+extern int sysctl_mptcp_raven_collect_samples;
+extern int sysctl_mptcp_raven_measure;
+extern int sysctl_mptcp_raven_debug;
 
 extern int sysctl_mptcp_raven_mode;
 extern int sysctl_mptcp_raven_cancelling;
@@ -131,3 +131,5 @@ static inline __be32 char_to_be32(char *uid, size_t len)
   }
   return (__be32)ret;
 }
+
+
