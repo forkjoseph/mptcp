@@ -1,13 +1,16 @@
 /*
- * MPTCP RAVEN: Strategic Redundancy MPTCP Scheduler v0.1
+ *	MPTCP RAVEN: Strategic Redundancy MPTCP Scheduler v0.1
  *
- * This is from the implementation of MPTCP RAVEN scheduler in
- * HyunJong Lee, Jason Flinn, and Basavaraj Tonsha,
- *  "RAVEN: Improving Interactive Latency for the Connected Car"
- * in MobiCom ’18: 24th Annual International Conference on Mobile
- * Computing and Networking, October 2018.
- * Available from:
- *  http://leelabs.org/pubs/mobicom18_raven.pdf
+ *	This is from the implementation of MPTCP RAVEN scheduler in
+ *	HyunJong Lee, Jason Flinn, and Basavaraj Tonsha,
+ *		"RAVEN: Improving Interactive Latency for the Connected Car"
+ *	in MobiCom ’18: 24th Annual International Conference on Mobile
+ *	Computing and Networking, October 2018.
+ *	Available from:
+ *		http://leelabs.org/pubs/mobicom18_raven.pdf
+ *
+ *	Current Maintainer & Author:
+ *	HyunJong (Joseph) Lee <hyunjong@umich.edu>
  */
  
 #include <net/mptcp.h>

@@ -1,9 +1,17 @@
-/**
- * Michigan MPTCP kernel UAPI 
- */ 
-#include <linux/fs.h>      // Needed by filp
-#include <asm/uaccess.h>   // Needed by segment descriptors
-
+/*
+ *	MPTCP RAVEN: Strategic Redundancy MPTCP Scheduler v0.1
+ *
+ *	This is from the implementation of MPTCP RAVEN scheduler in
+ *	HyunJong Lee, Jason Flinn, and Basavaraj Tonsha,
+ *		"RAVEN: Improving Interactive Latency for the Connected Car"
+ *	in MobiCom ’18: 24th Annual International Conference on Mobile
+ *	Computing and Networking, October 2018.
+ *	Available from:
+ *		http://leelabs.org/pubs/mobicom18_raven.pdf
+ *
+ *	Current Maintainer & Author:
+ *	HyunJong (Joseph) Lee <hyunjong@umich.edu>
+ */
 extern int sysctl_mptcp_raven_collect_samples;
 extern int sysctl_mptcp_raven_measure;
 
@@ -14,11 +22,22 @@ extern int sysctl_mptcp_raven_debug_pushone;
 #define raven_debug_input(sk) (mptcp(sk) && sysctl_mptcp_raven_debug_input)
 #define raven_debug_pushone(sk) (mptcp(tcp_sk(sk)) && sysctl_mptcp_raven_debug_input)
 
-/* per subflow stat measure */
+/* prediction interval stat measure 
+ *
+ * In the paper, it's called confidence interval (sorry! Joseph messed
+ * up naming for the initial implementation).
+ *
+ * Due to lack of floating support in kernel, we extensively use
+ * division to get floating numbers.
+ */
 struct raven_pim_stat {
   /* div by 1 million */
-  u64 norm_wsum; /* real wsum = normal wsum / 1000000 */
-  u64 norm_weight; /* real weight = normalized weight / 1000000 */
+	/* real wsum = normal wsum / 1000000 */
+  u64 norm_wsum; 
+
+	/* real weight = normalized weight / 1000000 */
+  u64 norm_weight; 
+
   ktime_t last_msmt_ts;
   ktime_t last_pred_ts;
   bool last_msmt_exist;
