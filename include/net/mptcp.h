@@ -46,6 +46,10 @@
 #include <crypto/hash.h>
 #include <net/tcp.h>
 
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+#include <net/mptcp_raven.h>
+#endif
+
 #if defined(__LITTLE_ENDIAN_BITFIELD)
 	#define ntohll(x)  be64_to_cpu(x)
 	#define htonll(x)  cpu_to_be64(x)
@@ -202,6 +206,27 @@ struct mptcp_tcp_sock {
 
 	/* HMAC of the third ack */
 	char sender_mac[20];
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  struct raven_pim_stat *pim_stat;
+  int lambda;
+
+  bool stat_valid;
+  spinlock_t stat_lock;
+  struct {
+    u32 observed;
+    u64 wmean_us;
+    u64 pi_tail;
+    u64 pi_low;
+    u64 pi_high;
+    u32 ess;
+  } stat;
+  struct {
+    u32 raven_c;
+    u32 raven_w;
+    u32 js_c;
+    u32 js_w;
+  } precision;
+#endif
 };
 
 struct mptcp_tw {
@@ -344,6 +369,31 @@ struct mptcp_cb {
 	u32 orig_window_clamp;
 
 	struct tcp_info	*master_info;
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+  /* red skb from write_queue */ 
+	struct sk_buff_head rdn_write_queue;
+  /* red skb from redundant_write_queue that have been already sent */ 
+	struct sk_buff_head rdn_rtx_queue;
+	spinlock_t  rdn_lock;
+  u32 cnt_rdn_skb;
+  u32 cnt_rcv_rdn_skb;
+  struct sk_buff_head rdn_storage_queue;
+
+  /* exp --> TODO: remove this for release */
+  u32 rdn_init_seq;
+  /* exp --> for measuring overhead in clean_rdn_rtx */
+  s64 overhead;
+
+  /* below is binded to userspace and global for a connection */
+  void *msre_ptr;
+
+  long pi1_predicted;
+  u32 pi1_n;
+  long pi2_predicted;
+  u32 pi2_n;
+  long pi3_predicted;
+  u32 pi3_n;
+#endif
 };
 
 #define MPTCP_VERSION_0 0
@@ -459,6 +509,9 @@ extern bool mptcp_init_failed;
 /* MPTCP flags: TX only */
 #define MPTCPHDR_INF		0x08
 #define MPTCP_REINJECT		0x10 /* Did we reinject this segment? */
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+#define MPTCP_REDUNDANT   0x20
+#endif
 
 struct mptcp_option {
 	__u8	kind;
@@ -883,6 +936,14 @@ void mptcp_mpcb_put(struct mptcp_cb *mpcb);
 int mptcp_finish_handshake(struct sock *child, struct sk_buff *skb);
 int mptcp_get_info(const struct sock *meta_sk, char __user *optval, int optlen);
 void mptcp_clear_sk(struct sock *sk, int size);
+#if IS_ENABLED(CONFIG_MPTCP_RAVEN)
+/* bool mptcp_reconstruct_mapping(struct sk_buff *skb); */
+bool mptcp_is_skb_redundant(const struct sk_buff *skb);
+/* bool mptcp_is_reinjected(const struct sk_buff *skb); */
+/* void mptcp_find_and_set_pathmask(const struct sock *meta_sk, struct sk_buff *skb); */
+void mptcp_append_flag(struct sock *sk, enum sock_flags flag);
+void mptcp_remove_flag(struct sock *sk, enum sock_flags flag);
+#endif
 
 /* MPTCP-path-manager registration/initialization functions */
 int mptcp_register_path_manager(struct mptcp_pm_ops *pm);
