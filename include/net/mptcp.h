@@ -387,8 +387,8 @@ struct mptcp_cb {
   s64 overhead;
 
   /* below is binded to userspace and global for a connection */
+  bool stripe_mode;
   void *msre_ptr;
-
   long pi1_predicted;
   u32 pi1_n;
   long pi2_predicted;

@@ -81,14 +81,18 @@ int sysctl_mptcp_raven_collect_samples __read_mostly = 1;
 EXPORT_SYMBOL(sysctl_mptcp_raven_collect_samples);
 int sysctl_mptcp_raven_measure __read_mostly = 0;
 EXPORT_SYMBOL(sysctl_mptcp_raven_measure);
-int sysctl_mptcp_raven_mode __read_mostly = 0;
-EXPORT_SYMBOL(sysctl_mptcp_raven_mode);
+
+int sysctl_mptcp_raven_aging __read_mostly = 0;
+EXPORT_SYMBOL(sysctl_mptcp_raven_aging);
+int sysctl_mptcp_raven_switching __read_mostly = 0;
+EXPORT_SYMBOL(sysctl_mptcp_raven_switching);
+int sysctl_mptcp_raven_cancelling __read_mostly = 0;
+EXPORT_SYMBOL(sysctl_mptcp_raven_cancelling);
+
 int sysctl_mptcp_raven_debug_input __read_mostly = 0;
 EXPORT_SYMBOL(sysctl_mptcp_raven_debug_input);
 int sysctl_mptcp_raven_debug_pushone __read_mostly = 0;
 EXPORT_SYMBOL(sysctl_mptcp_raven_debug_pushone);
-int sysctl_mptcp_raven_cancelling __read_mostly = 0;
-EXPORT_SYMBOL(sysctl_mptcp_raven_cancelling);
 #endif
 
 bool mptcp_init_failed __read_mostly;
@@ -188,12 +192,27 @@ static struct ctl_table mptcp_table[] = {
     .proc_handler = &proc_dointvec
   },
   {
-    .procname = "mptcp_raven_mode",
-    .data = &sysctl_mptcp_raven_mode,
+    .procname = "mptcp_raven_aging",
+    .data = &sysctl_mptcp_raven_aging,
     .maxlen = sizeof(int),
     .mode = 0664,
     .proc_handler = &proc_dointvec
   },
+  {
+    .procname = "mptcp_raven_switching",
+    .data = &sysctl_mptcp_raven_switching,
+    .maxlen = sizeof(int),
+    .mode = 0664,
+    .proc_handler = &proc_dointvec
+  },
+  {
+    .procname = "mptcp_raven_cancelling",
+    .data = &sysctl_mptcp_raven_cancelling,
+    .maxlen = sizeof(int),
+    .mode = 0664,
+    .proc_handler = &proc_dointvec
+  },
+
   {
     .procname = "mptcp_raven_debug_input",
     .data = &sysctl_mptcp_raven_debug_input,
@@ -204,13 +223,6 @@ static struct ctl_table mptcp_table[] = {
   {
     .procname = "mptcp_raven_debug_pushone",
     .data = &sysctl_mptcp_raven_debug_pushone,
-    .maxlen = sizeof(int),
-    .mode = 0664,
-    .proc_handler = &proc_dointvec
-  },
-  {
-    .procname = "mptcp_raven_cancelling",
-    .data = &sysctl_mptcp_raven_cancelling,
     .maxlen = sizeof(int),
     .mode = 0664,
     .proc_handler = &proc_dointvec
@@ -2532,221 +2544,7 @@ out:
   return dseq;
 }
 EXPORT_SYMBOL(mptcp_get_skb_dseq);
-
-#if 0 
-/* @skb_seq: MTPCP skb's end_seq 
- * sample is maintained in each socket's list
- */
-int mptcp_dcm_sample_create(struct sock *sk, u32 skb_seq) 
-{
-  const struct tcp_sock *tp = tcp_sk(sk);
-  struct mptcp_dcm_sample *sample;
-  ktime_t kts = ktime_get();
-
-  sample = kmem_cache_alloc(mptcp_dcm_sample_cache, GFP_ATOMIC);
-  if (!sample)
-		return -ENOBUFS;
-
-	rcu_read_lock();
-  sample->init_ts = kts;
-  sample->skb_seq = skb_seq;
-  sample->rtt_raw = sample->bw_est = 0;
-  sample->check.valid = false;
-
-  spin_lock(&tp->mptcp->stat_lock);
-  sample->pi.wmin = tp->mptcp->stat.pi_low;
-  sample->pi.wmean = tp->mptcp->stat.wmean_us;
-  sample->pi.wmax = tp->mptcp->stat.pi_high;
-  sample->js.mean = tp->srtt_us;
-  sample->js.mdev = tp->mdev_us;
-  sample->js.var = tp->rttvar_us;
-  spin_unlock(&tp->mptcp->stat_lock);
-
-  spin_lock(&tp->mptcp->sample_list_lock);
-  sample->abs_seq = atomic_read(&tp->mptcp->sample_list_len);
-  list_add(&sample->list, &tp->mptcp->sample_list);
-  spin_unlock(&tp->mptcp->sample_list_lock);
-
-	atomic_inc(&tp->mptcp->sample_list_len);
-	rcu_read_unlock();
-  return 0;
-}
-
-int mptcp_dcm_sample_update(struct sock *sk, u32 skb_seq, long rtt_raw, u32 bw_est) 
-{
-  const struct tcp_sock *tp = tcp_sk(sk);
-  struct mptcp_dcm_sample *ptr;
-  ktime_t acked_ts = ktime_get();
-  bool found_target = false;
-
-  if (unlikely(!sk || !skb_seq))
-    return -ENONULL;
-
-  if (unlikely(rtt_raw < 0))
-    return -ENONEG;
-
-  rcu_read_lock();
-  list_for_each_entry_rcu(ptr, &tp->mptcp->sample_list, list) {
-    if (ptr->skb_seq != skb_seq) 
-      continue;
-
-    /* for duplicate, assume it's retransmitted or out-of-order packet */
-    if (ptr->rtt_raw) 
-      continue;
-
-    if (ptr->skb_seq == skb_seq) { 
-      found_target = true;
-      ptr->rtt_raw = rtt_raw;
-      ptr->bw_est = bw_est;
-      ptr->acked_ts = acked_ts;
-      ptr->check.valid = true;
-      break;
-    }
-  }
-
-  if (found_target)
-    atomic_inc(&tp->mptcp->sample_updated);
-  rcu_read_unlock();
-
-#if 0
-  if (found_target) 
-  {
-    // between 
-    if (ptr->pi.wmin <= ptr->rtt_raw && ptr->rtt_raw <= ptr->pi.wmax) {
-      tp->mptcp->precision.raven_c += 1;
-    } else {
-      tp->mptcp->precision.raven_w += 1;
-    }
-
-    u32 js_mean = (ptr->js.mean >> 3);
-    u32 js_mdev = (ptr->js.mdev >> 3);
-    u32 js_min = 0;
-    if (js_mean > (js_mdev * 3))
-      js_min = js_mean - js_mdev;
-    u32 js_max = js_mean + (js_mdev * 3);
-    if (js_min <= ptr->rtt_raw && ptr->rtt_raw <= js_max) {
-      tp->mptcp->precision.js_c += 1;
-    } else {
-      tp->mptcp->precision.js_w += 1;
-    }
-#if 0
-    s64 werror = ptr->pi.wmean - ptr->rtt_raw;
-    /* if (rtt_raw > werror) */
-    /*   werror = rtt_raw - werror; */
-    /* else */
-    /*   werror -= rtt_raw; */
-
-    u32 js_mean = (ptr->js.mean >> 3);
-    s32 js_error = js_mean - ptr->rtt_raw;
-    /* if (rtt_raw > js_error) */
-    /*   js_error = rtt_raw - js_error; */
-    /* else */
-    /*   js_error -= rtt_raw; */
-
-    pr_emerg("[%s] pi %u skb %u, rtt %ld, "
-        "PI [(%llu - %llu), wmean %llu, err %lld] "
-        "JS [mean %u, mdev %u, err %d]"
-        "\n", __func__,
-        mptcp_path_index(sk), skb_seq, rtt_raw,
-        ptr->pi.wmin, ptr->pi.wmax, ptr->pi.wmean,  werror,
-        js_mean, js_mdev, js_error);
-#endif
-  }
-#endif
-
-  return 0;
-}
-
-void mptcp_dcm_sample_delete(struct sock *sk, struct mptcp_dcm_sample *ptr)
-{
-  const struct tcp_sock *tp = tcp_sk(sk);
-
-  if (unlikely(!ptr))
-    return;
-
-  /* decrease the list len of samples */
-  atomic_dec(&tp->mptcp->sample_list_len);
-  
-  if (ptr->check.valid)
-    atomic_dec(&tp->mptcp->sample_updated);
-
-  list_del(&ptr->list);
-  /* kmem_cache_free(mptcp_dcm_sample_cache, ptr); */
-  return;
-}
-EXPORT_SYMBOL(mptcp_dcm_sample_delete);
-
-void mptcp_dcm_sample_delete_all(struct sock *sk) 
-{
-  const struct tcp_sock *tp = tcp_sk(sk);
-  int list_len = 0;
-  struct mptcp_dcm_sample *ptr, *next;
-  u8 pi;
-
-  if (unlikely(!sysctl_mptcp_dcm_collect_samples))
-    return;
-
-  if (!tp->mptcp || unlikely(!tp->mpcb))
-    return;
-
-  if (unlikely(!tp->mpcb->dcm_policy->redundancy))
-    return;
-
-  list_len = atomic_read(&tp->mptcp->sample_list_len);
-  pi = tp->mptcp->path_index;
-  /* mptcp_debug("[%s] subflow %u, deleting %d samples [", __func__, pi, list_len); */
-
-  if (list_len < 1)
-    return;
-
-  list_for_each_entry_safe(ptr, next, &tp->mptcp->sample_list, list) {
-    mptcp_dcm_sample_delete(sk, ptr);
-  }
-
-  return;
-}
-EXPORT_SYMBOL(mptcp_dcm_sample_delete_all);
-
-void mptcp_dcm_sample_destroy(struct sock *sk) 
-{
-  const struct tcp_sock *tp = tcp_sk(sk);
-  int list_len = 0;
-  struct mptcp_dcm_sample *ptr, *next;
-  u8 pi = mptcp_path_index(sk);
-
-  list_len = atomic_read(&tp->mptcp->sample_list_len);
-  if (list_len < 1)
-    return;
-
-  /* pr_emerg("[%s] pi %u stat: (", __func__, mptcp_path_index(sk)); */
-  tp->mptcp->sample_list_exist = false;
-  list_for_each_entry_safe(ptr, next, &tp->mptcp->sample_list, list) {
-    if (unlikely(!ptr))
-      continue;
-
-    if (!ptr->rtt_raw)
-      continue;
-
-    s64 werror = ptr->pi.wmean - ptr->rtt_raw;
-    s32 js_error = (ptr->js.mean >> 3) - ptr->rtt_raw;
-    /* printk("[%ld ? %lld, %d], ", ptr->rtt_raw, werror, js_error); */
-    /* do not print the samples ... */
-    /* pr_emerg("[%u, %ld, %lld]\n", pi, ptr->rtt_raw, ktime_to_ms(ptr->acked_ts)); */
-    mptcp_dcm_sample_delete(sk, ptr);
-  }
-  /* printk(")\n"); */
-
-  u32 raven_t = tp->mptcp->precision.raven_c + tp->mptcp->precision.raven_w;
-  u32 js_t = tp->mptcp->precision.js_c + tp->mptcp->precision.js_w;
-  /* pr_emerg("[%s] pi %u raven %u / %u, js %u/%u\n", __func__, */
-  /*     mptcp_path_index(sk), */ 
-  /*     tp->mptcp->precision.raven_c, raven_t, */
-  /*     tp->mptcp->precision.js_c, js_t); */
-
-  return;
-}
-#endif
-#endif /* CONFIG_MPTCP_DCM */
+#endif /* CONFIG_MPTCP_RAVEN */
 
 
 /* Updates the rcv_nxt of the time-wait-socks and allows them to ack a

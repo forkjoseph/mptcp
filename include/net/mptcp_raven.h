@@ -14,9 +14,10 @@
  */
 extern int sysctl_mptcp_raven_collect_samples;
 extern int sysctl_mptcp_raven_measure;
-
-extern int sysctl_mptcp_raven_mode;
+extern int sysctl_mptcp_raven_aging;
+extern int sysctl_mptcp_raven_switching;
 extern int sysctl_mptcp_raven_cancelling;
+
 extern int sysctl_mptcp_raven_debug_input;
 extern int sysctl_mptcp_raven_debug_pushone;
 #define raven_debug_input(sk) (mptcp(sk) && sysctl_mptcp_raven_debug_input)
@@ -86,19 +87,10 @@ struct mptcp_dcm_sample {
  * update: done at getting acked
  *  - acked_ts : timestamp when rtt got updated
  */
-int mptcp_dcm_sample_create(struct sock *sk, u32 seq);
-int mptcp_dcm_sample_update(struct sock *sk, u32 seq, long rtt_raw, u32 bw_est);
-void mptcp_dcm_sample_delete(struct sock *sk, struct mptcp_dcm_sample *ptr);
-void mptcp_dcm_sample_delete_all(struct sock *sk);
-void mptcp_dcm_sample_destroy(struct sock *sk);
 int mptcp_raven_build_pi(struct sock *sk, u64 *wmean, u64 *wsep, u64
     *ess, s64 *min_delta, u64 *wsum, ktime_t now);
-int mptcp_raven_get_pi(struct sock *sk, u64 wmean, u64 wsep, u64 ess,
-    u64 *wme, u64 *pi_min, u64 *pi_max);
-int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta, 
+int mptcp_raven_get_pi(struct sock *sk, u64 wmean, s64 min_delta, 
     u64 *pi_min, u64 *pi_max, ktime_t now);
-void mptcp_dcm_queue_redundant_data(struct sk_buff *orig_skb, struct sock *meta_sk,
-    struct sock *sk, int clone_it);
 int mptcp_raven_pim(struct sock *sk, u32 skb_seq, long rtt_raw, u32 bw_est);
 u32 mptcp_get_skb_dseq(struct sk_buff *skb);
 u32 mptcp_get_skb_dack(struct sk_buff *skb);
@@ -146,5 +138,3 @@ static inline __be32 char_to_be32(char *uid, size_t len)
   }
   return (__be32)ret;
 }
-
-

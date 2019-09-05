@@ -1,8 +1,3 @@
-/* #define CASE 1 */
-#define CASE 2
-/* #define CASE 3 */
-/* #define CASE 4 */
-
 /* 10, 50, 90 */
 /* #define CI_INT 10 */
 /* #define CI_INT 30 */
@@ -10,15 +5,10 @@
 /* #define CI_INT 70 */
 #define CI_INT 90
 
-#if CASE == 1
-int lambdas[] = {256, 128, 512};
-#elif CASE == 2
-int lambdas[] = {256, 256};
-#elif CASE == 3
-int lambdas[] = {262144, 128};
-#elif CASE == 4
-int lambdas[] = {256, 256, 512};
-#endif
+int lambdas1[] = {256, 128, 512};
+int lambdas2[] = {256, 256};
+int lambdas3[] = {262144, 128};
+int lambdas4[] = {256, 256, 512};
 
 #if CI_INT == 99
 u64 D1_pi_lower[] = {787334,752643,966856};

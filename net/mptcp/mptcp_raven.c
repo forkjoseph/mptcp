@@ -18,18 +18,17 @@
 #include <net/mptcp_raven_stale_table.h>
 
 /* #define FLIPFLOP 1 */
-#define ENABLE_AGING 1
-#define PERF_STAT 0
 
 static bool has_been_est;
 static unsigned int has_been_sent;
 
-static int target_case = 0;
-static int target_ci = 0;
-#if defined(FLIPFLOP) && FLIPFLOP
+static int *lambdas;
+static int target_case = 2;
+static int target_ci = 90;
+/* #if defined(FLIPFLOP) && FLIPFLOP */
 static int to_stripe = 0;
 static int to_redundancy = 0;
-#endif
+/* #endif */
 
 /* private data */
 struct raven_sock_data {
@@ -325,7 +324,7 @@ failed:
   return -1;
 }
 
-int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta, 
+int mptcp_raven_get_pi(struct sock *sk, u64 wmean, s64 min_delta, 
     u64 *pi_min, u64 *pi_max, ktime_t now_ts) 
 {
   struct tcp_sock *tp = tcp_sk(sk);
@@ -353,9 +352,9 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
       aging_idx = 1000;
     } else { 
       /* max idx for aging factors */
-      if (CASE == 1) {
+      if (target_case == 1) {
         aging_idx = 35; 
-      } else if (CASE == 4) {
+      } else if (target_case == 4) {
         aging_idx = 12;
       }
     }
@@ -368,16 +367,16 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
     /*   ); */
   }
 
-  if (CASE == 1) { 
-#if defined(ENABLE_AGING) && ENABLE_AGING
-    if (pi_idx == 1) {
-      aging = D1_1_stale[aging_idx];
-    } else if (pi_idx == 2) {
-      aging = D1_2_stale[aging_idx];
-    } else if (pi_idx == 3) { 
-      aging = D1_3_stale[aging_idx];
-    }
-#endif
+  if (target_case == 1) { 
+		if (unlikely(sysctl_mptcp_raven_aging)) {
+			if (pi_idx == 1) {
+				aging = D1_1_stale[aging_idx];
+			} else if (pi_idx == 2) {
+				aging = D1_2_stale[aging_idx];
+			} else if (pi_idx == 3) { 
+				aging = D1_3_stale[aging_idx];
+			}
+		}
 
     u_bound = (D1_pi_upper[pi_idx] * aging) / 1000000;
     u_bound = (decay + u_bound) / 1000000;
@@ -387,7 +386,7 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
     tmp = (decay - l_bound);
     tmp = (wmean * tmp);
     l_bound = tmp / 1000000;
-  } else if (CASE == 2) {
+  } else if (target_case == 2) {
     if (mptcp_path_index(sk) == 1) { 
       aging = D2_1_stale[aging_idx];
     } else if (mptcp_path_index(sk) == 2) { 
@@ -402,13 +401,13 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
     tmp = (decay - l_bound);
     tmp = (wmean * tmp);
     l_bound = tmp / 1000000;
-
-  } else if (CASE == 3) {
+  } else if (target_case == 3) {
     if (mptcp_path_index(sk) == 1) { 
       aging = D3_1_stale[aging_idx];
     } else if (mptcp_path_index(sk) == 2) { 
       aging = D3_2_stale[aging_idx];
     }
+
     u_bound = (D3_pi_upper[pi_idx] * aging) / 1000000;
     u_bound = (decay + u_bound) / 1000000;
     u_bound = wmean * u_bound;
@@ -417,7 +416,7 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
     tmp = (decay - l_bound);
     tmp = (wmean * tmp);
     l_bound = tmp / 1000000;
-  } else if (CASE == 4) {
+  } else if (target_case == 4) {
     if (mptcp_path_index(sk) == 1) { 
       aging = D4_1_stale[aging_idx];
     } else if (mptcp_path_index(sk) == 2) { 
@@ -425,6 +424,7 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
     } else if (mptcp_path_index(sk) == 3) { 
       aging = D4_3_stale[aging_idx];
     }
+
     u_bound = (D4_pi_upper[pi_idx] * aging) / 1000000;
     u_bound = (decay + u_bound) / 1000000;
     u_bound = wmean * u_bound;
@@ -433,7 +433,11 @@ int mptcp_raven_get_pi2(struct sock *sk, u64 wmean, s64 min_delta,
     tmp = (decay - l_bound);
     tmp = (wmean * tmp);
     l_bound = tmp / 1000000;
-  }
+  } else {
+    l_bound = 0;
+    u_bound = ULONG_MAX / 2;
+	}
+
   *pi_min = l_bound;
   *pi_max = u_bound;
   /* pr_emerg("[%s] pi %u, l %llu, u %llu\n", __func__, */
@@ -614,18 +618,16 @@ static bool raven_mptcp_is_temp_unavailable(struct sock *sk,
 static bool dummy_selector(struct sock* sk, struct sk_buff *skb) { return true; }
 
 /* redundancy subflow selector */
-struct sock *get_rdn_subflow(struct mptcp_cb *mpcb, 
+struct sock *get_redundant_subflow(struct mptcp_cb *mpcb, 
       struct sk_buff *skb, bool (*selector)(struct sock*, struct sk_buff*), 
       bool zwnd_test, bool *force)
 {
 	struct sock *sk, *sk2, *bestsk = NULL, *meta_sk = mpcb->meta_sk;
   struct sk_buff *rdn_skb = NULL;
   struct tcp_sock *meta_tp = tcp_sk(meta_sk);
-  struct inet_sock *isk = inet_sk(meta_sk);
 
   /* statistics stuff */ 
 	u32 min_srtt = 0xffffffff;
-  /* u64 low_bound = 0xffffffff, high_bound = 0; */
   u64 min_high = 0xffffffff, min_low = 0xffffffff;
   int min_idx = 0;
   bool has_minpi_found = false;
@@ -645,18 +647,9 @@ struct sock *get_rdn_subflow(struct mptcp_cb *mpcb,
     return (struct sock *)mpcb->connection_list;
   }
 
-  /* if (mptcp_is_skb_redundant(skb)) { */
-  /*   u32 seq, eseq; */
-  /*   seq = TCP_SKB_CB(skb)->seq; */
-  /*   eseq = TCP_SKB_CB(skb)->end_seq; */
-  /*   pr_crit("[%s] pi n/a, cnt_redudnant %d, " */
-  /*       "seq %u, eseq %u, pm %u, len %u, " */
-  /*       "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u]\n" */
-  /*       , __func__, */ 
-  /*       skb->cnt_redudnant, seq, eseq, TCP_SKB_CB(skb)->path_mask, skb->len, */
-  /*       meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt); */
-  /* } */
+	now_ts = ktime_get();
 
+	// TODO: move to swtiching sysctl 
   if (sysctl_mptcp_raven_measure) 
   {
 #if defined(FLIPFLOP) && FLIPFLOP
@@ -736,8 +729,6 @@ struct sock *get_rdn_subflow(struct mptcp_cb *mpcb,
     if (mptcp_is_skb_redundant(skb))
       goto rdn_detected;
     use_redundancy = false;
-
-    /* pr_emerg("[%s] AAAAAAAAAAAAAAAAAA %u\n", __func__, TCP_SKB_CB(skb)->seq); */
 
     goto get_generic;
   }
@@ -884,8 +875,8 @@ rdn_detected:
           &min_delta, &wsum, now_ts);
 
       if (use_intervals == 2) 
-        mptcp_raven_get_pi2(sk, wmean, min_delta,
-            &pi_min, &pi_max, now_ts); 
+				mptcp_raven_get_pi(sk, wmean, min_delta, &pi_min, &pi_max,
+						now_ts); 
 
       js_mean = (tp->srtt_us >> 3);
       /* pr_emerg("pi %u: jacobson %4u, raven: %4llu [%4llu - %4llu] use %d, mDelta %lld\n", */
@@ -1261,31 +1252,10 @@ struct sock *raven_get_subflow(struct sock *meta_sk,
     ret = sk;
   } else { 
     /* find appropriate subflow for its usage */
-    ret = get_rdn_subflow(mpcb, skb, &dummy_selector, zero_wnd_test, &force);
-#if 0
-    if (mpcb->raven_policy->redundancy) {
-      sk = get_rdn_subflow(mpcb, skb, &dummy_selector, zero_wnd_test, &force);
-    } else if (mpcb->raven_policy->intnet) { // intentional networking
-      /* sk = get_intnet_subflow(meta_sk, skb, zero_wnd_test); */
-      pr_emerg("[%s] depreciated!!!\n", __func__);
-    } else {  // default mptcp policy
-      sk = get_generic_subflow(mpcb, skb, &dummy_selector, zero_wnd_test,  &force);
-    }
-    ret = sk;
-#endif
+    ret = get_redundant_subflow(mpcb, skb, &dummy_selector, zero_wnd_test, &force);
   }
 
 out:
-#if 0 
-  if (ret)
-    pr_emerg("returning subflow pi %u, fully %s snt_isn %u, rcv_isn %u\n",
-        mptcp_path_index(ret), 
-        (tcp_sk(ret)->mptcp->fully_established ? "true" : "false"),
-        tcp_sk(ret)->mptcp->snt_isn, tcp_sk(ret)->mptcp->rcv_isn);
-  pr_emerg("has_been_sent %u, has_been_est %s from %ps\n", has_been_sent,
-      (has_been_est ? "true" : "false"), 
-      __builtin_return_address(0));
-#endif
   return ret;
 }
 
@@ -1448,19 +1418,6 @@ again:
 	}
 
 out:
-#if 1
-  /* if (skb && has_been_est) { */ 
-  /*   u32 seq, eseq; */
-  /*   seq = TCP_SKB_CB(skb)->seq; */
-  /*   eseq = TCP_SKB_CB(skb)->end_seq; */
-  /*   pr_crit("[%s] from %s: cnt_redudnant %d, " */
-  /*       "seq %u, eseq %u, pm %u, len %u, " */
-  /*       "meta [snd_una %u, snt_nxt %u, redundant_snd_nxt %u]\n" */
-  /*       , __func__, ( from_rdn_wqueue ? "rdn_wqueue" : "meta_wqueue"), */
-  /*       cnt_redudnant, seq, eseq, pm, skb->len, */
-  /*       meta_tp->snd_una, meta_tp->snd_nxt, meta_tp->redundant_snd_nxt); */
-  /* } */
-#endif
 	return skb;
 }
 
@@ -1474,6 +1431,8 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
 	u32 max_len, max_segs, window, needed;
   int redundant = 0;
   bool returnnull = false;
+  struct tcp_sock *meta_tp = tcp_sk(meta_sk);
+	struct mptcp_cb *mpcb = meta_tp->mpcb;
 
   *reinject = 0;
 
@@ -1495,21 +1454,15 @@ static struct sk_buff *raven_next_segment(struct sock *meta_sk,
   /*       pr_emerg("meta %u\n", TCP_SKB_CB(tcp_write_queue_head(meta_sk))->seq); */
   /* /1* } *1/ */
 
-  /* if (port == 48081)  // flipflop on data-flow only */
-  { 
-#if defined(FLIPFLOP) && FLIPFLOP
-  if (sysctl_mptcp_raven_measure && mpcb->stripe_mode) { 
-      /* pr_emerg("[%s] qlen %u, current mode stripe\n", __func__, */
-      /*     skb_queue_len(&((meta_sk)->sk_write_queue))); */
-
-    if (!skb_queue_len(&((meta_sk)->sk_write_queue))) {
-      mpcb->stripe_mode = false;
-      pr_emerg("[%s] switching to redundancy! sb ?, qlen 0\n", __func__);
-      to_redundancy += 1;
-    }
+	if (sysctl_mptcp_raven_switching) { 
+		if (mpcb && mpcb->stripe_mode) { 
+			if (!skb_queue_len(&((meta_sk)->sk_write_queue))) {
+				mpcb->stripe_mode = false;
+				pr_emerg("[%s] switching to redundancy! sb ?, qlen 0\n", __func__);
+				to_redundancy += 1;
+			}
+		}
   }
-#endif
-  } 
 
   /* for other policies, use default next_segment note that for principled
    * redundancy segments, it will return redundant int set 
@@ -1798,8 +1751,8 @@ static void raven_sched_init(struct sock *sk)
   }
 #endif
 
-  pr_emerg("[%s] pi %u lambda idx %d for tracce %d, CI %d\n", __func__,
-      mptcp_path_index(sk), pi_idx, CASE, CI_INT);
+  pr_emerg("[%s] RAVEN: pi=%u lambda idx=%d for tracce=%d, CI=%d\n", __func__,
+			mptcp_path_index(sk), pi_idx, target_case, target_ci);
 }
 
 static struct mptcp_sched_ops mptcp_sched_raven = {
@@ -1818,7 +1771,32 @@ static int __init raven_register(void)
 	if (mptcp_register_scheduler(&mptcp_sched_raven)) 
     goto fail;
 
-	pr_emerg("[%s] trace d%d, CI %d\n", __func__, CASE, CI_INT);
+	pr_emerg("[%s] RAVEN: trace=%d, confidence interval=%d\n", __func__,
+			target_case, target_ci);
+
+	if (target_case < 1 || target_case > 4) 
+	{
+		pr_emerg("[%s] RAVEN supports only target case 1-4 for now. "
+				" Using target 2 case as a default\n", __func__);
+		target_case = 2;
+	} 
+
+	switch(target_case) {
+		case 1:
+			lambdas = lambdas1;
+			break;
+		case 2:
+			lambdas = lambdas2;
+			break;
+		case 3:
+			lambdas = lambdas3;
+			break;
+		case 4:
+			lambdas = lambdas4;
+			break;
+	}
+
+
   return 0;
 fail:
   return -1;

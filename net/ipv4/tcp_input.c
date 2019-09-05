@@ -4806,7 +4806,7 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
    * in bigger case, skb is injected to meta recv ofo queue to process
    * it later
    */
-  if (mptcp(tp) &&  (TCP_SKB_CB(skb)->seq != tp->rcv_nxt)) 
+	if (mptcp(tp) && (TCP_SKB_CB(skb)->seq != tp->rcv_nxt))
   {
     meta_sk = mptcp_meta_sk(sk);
     meta_tp = mptcp_meta_tp(tp);
@@ -4900,9 +4900,7 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
       }
     } /* if redundancy */
   } /* if mptcp */
-#endif /* CONFIG_MPTCP_3AVEN */
-
-
+#endif /* CONFIG_MPTCP_RAVEN */
 
 	/*  Queue data for delivery to the user.
 	 *  Packets in sequence go to the receive queue.
