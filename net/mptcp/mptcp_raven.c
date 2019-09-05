@@ -1796,7 +1796,6 @@ static int __init raven_register(void)
 			break;
 	}
 
-
   return 0;
 fail:
   return -1;
